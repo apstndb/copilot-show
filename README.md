@@ -87,6 +87,9 @@ The following commands are hidden by default but can be executed by specifying t
 - `workspace`: List files in the workspace
 - `read-file <path>`: Read a specific file from the workspace
 - `ping`: Check connection to the server
+- `status`: Show CLI version and authentication status
+- `sessions`: List all sessions with PID information
+- `history [sessionID]`: Show conversation history (from local event logs)
 
 ## License
 

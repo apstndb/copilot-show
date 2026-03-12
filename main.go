@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/github/copilot-sdk/go"
@@ -48,14 +52,24 @@ func main() {
 	rootCmd.AddCommand(newQuotaCmd(client))
 	rootCmd.AddCommand(newModelsCmd(client))
 	rootCmd.AddCommand(newToolsCmd(client))
-	rootCmd.AddCommand(newAgentsCmd(client))
-	rootCmd.AddCommand(newCurrentModelCmd(client))
-	rootCmd.AddCommand(newCurrentAgentCmd(client))
-	rootCmd.AddCommand(newModeCmd(client))
-	rootCmd.AddCommand(newPlanCmd(client))
-	rootCmd.AddCommand(newWorkspaceCmd(client))
-	rootCmd.AddCommand(newReadFileCmd(client))
-	rootCmd.AddCommand(newPingCmd(client))
+
+	hiddenCmds := []*cobra.Command{
+		newAgentsCmd(client),
+		newCurrentModelCmd(client),
+		newCurrentAgentCmd(client),
+		newModeCmd(client),
+		newPlanCmd(client),
+		newWorkspaceCmd(client),
+		newReadFileCmd(client),
+		newPingCmd(client),
+		newStatusCmd(client),
+		newSessionsCmd(client),
+		newHistoryCmd(client),
+	}
+	for _, c := range hiddenCmds {
+		c.Hidden = true
+		rootCmd.AddCommand(c)
+	}
 
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -664,6 +678,233 @@ func showCurrentAgent(ctx context.Context, client *copilot.Client, format string
 	if err != nil {
 		log.Printf("Error in current-agent command: %v", err)
 	}
+}
+
+func newStatusCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show CLI status and authentication status",
+		Run: func(cmd *cobra.Command, args []string) {
+			showStatus(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+func showStatus(ctx context.Context, client *copilot.Client, format string) {
+	status, err := client.GetStatus(ctx)
+	if err != nil {
+		log.Printf("Error fetching status: %v", err)
+		return
+	}
+
+	auth, err := client.GetAuthStatus(ctx)
+	if err != nil {
+		log.Printf("Error fetching auth status: %v", err)
+		return
+	}
+
+	combined := struct {
+		Status *copilot.GetStatusResponse     `json:"status" yaml:"status"`
+		Auth   *copilot.GetAuthStatusResponse `json:"auth" yaml:"auth"`
+	}{
+		Status: status,
+		Auth:   auth,
+	}
+
+	if format == "yaml" {
+		printYAML(combined)
+		return
+	}
+
+	fmt.Println("--- CLI Status ---")
+	table := tablewriter.NewWriter(os.Stdout)
+	configureTable(table, []string{"Property", "Value"}, nil)
+	table.Append([]string{"Version", status.Version})
+	table.Append([]string{"Protocol Version", fmt.Sprintf("%d", status.ProtocolVersion)})
+	table.Render()
+
+	fmt.Println("\n--- Auth Status ---")
+	tableAuth := tablewriter.NewWriter(os.Stdout)
+	configureTable(tableAuth, []string{"Property", "Value"}, nil)
+	tableAuth.Append([]string{"Authenticated", fmt.Sprintf("%v", auth.IsAuthenticated)})
+	if auth.Login != nil {
+		tableAuth.Append([]string{"Login", *auth.Login})
+	}
+	if auth.Host != nil {
+		tableAuth.Append([]string{"Host", *auth.Host})
+	}
+	tableAuth.Render()
+}
+
+func newSessionsCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "sessions",
+		Short: "List all Copilot sessions",
+		Run: func(cmd *cobra.Command, args []string) {
+			showSessions(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+func showSessions(ctx context.Context, client *copilot.Client, format string) {
+	sessions, err := client.ListSessions(ctx, nil)
+	if err != nil {
+		log.Printf("Error listing sessions: %v", err)
+		return
+	}
+
+	lastID, _ := client.GetLastSessionID(ctx)
+	fgID, _ := client.GetForegroundSessionID(ctx)
+
+	// Try to scan local session-state directory for additional info (e.g., PID locks)
+	localStates := make(map[string]string)
+	home, _ := os.UserHomeDir()
+	stateDir := filepath.Join(home, ".copilot", "session-state")
+	entries, _ := os.ReadDir(stateDir)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			sessionID := entry.Name()
+			subEntries, _ := os.ReadDir(filepath.Join(stateDir, sessionID))
+			for _, sub := range subEntries {
+				if strings.HasPrefix(sub.Name(), "inuse.") && strings.HasSuffix(sub.Name(), ".lock") {
+					pid := strings.TrimSuffix(strings.TrimPrefix(sub.Name(), "inuse."), ".lock")
+					localStates[sessionID] = pid
+				}
+			}
+		}
+	}
+
+	if format == "yaml" {
+		combined := struct {
+			Sessions          []copilot.SessionMetadata `json:"sessions" yaml:"sessions"`
+			LastSessionID     *string                   `json:"lastSessionId" yaml:"lastSessionId"`
+			ForegroundSession *string                   `json:"foregroundSessionId" yaml:"foregroundSessionId"`
+			LocalPIDs         map[string]string         `json:"localPids" yaml:"localPids"`
+		}{
+			Sessions:          sessions,
+			LastSessionID:     lastID,
+			ForegroundSession: fgID,
+			LocalPIDs:         localStates,
+		}
+		printYAML(combined)
+		return
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	header := []string{"ID", "CWD", "StartTime", "ModifiedTime", "Status", "PID"}
+	configureTable(table, header, nil)
+
+	for _, s := range sessions {
+		cwd := "-"
+		if s.Context != nil {
+			cwd = s.Context.Cwd
+		}
+		status := ""
+		if lastID != nil && s.SessionID == *lastID {
+			status += "[Last]"
+		}
+		if fgID != nil && s.SessionID == *fgID {
+			if status != "" {
+				status += " "
+			}
+			status += "[Foreground]"
+		}
+
+		pid := "-"
+		if p, ok := localStates[s.SessionID]; ok {
+			pid = p
+		}
+
+		table.Append([]string{
+			s.SessionID,
+			cwd,
+			s.StartTime,
+			s.ModifiedTime,
+			status,
+			pid,
+		})
+	}
+	table.Render()
+}
+
+func newHistoryCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "history [sessionID]",
+		Short: "Show conversation history for a session",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var sessionID string
+			if len(args) > 0 {
+				sessionID = args[0]
+			} else {
+				lastID, err := client.GetLastSessionID(cmd.Context())
+				if err != nil || lastID == nil {
+					log.Printf("No session ID provided and no last session found")
+					return
+				}
+				sessionID = *lastID
+			}
+			showHistory(cmd.Context(), client, sessionID, outputFormat)
+		},
+	}
+}
+
+func showHistory(ctx context.Context, client *copilot.Client, sessionID string, format string) {
+	// SDK workaround: we need a way to call session.getMessages without a Session object
+	// since we only have sessionID. client.RPC is ServerRpc which doesn't have SessionRpc.
+	// We'll try to read local events.jsonl as a fallback/primary source since we analyzed it.
+
+	home, _ := os.UserHomeDir()
+	eventsPath := filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
+
+	if _, err := os.Stat(eventsPath); err == nil {
+		f, err := os.Open(eventsPath)
+		if err == nil {
+			defer f.Close()
+			scanner := bufio.NewScanner(f)
+			var events []any
+			for scanner.Scan() {
+				var ev any
+				if err := json.Unmarshal(scanner.Bytes(), &ev); err == nil {
+					events = append(events, ev)
+				}
+			}
+
+			if format == "yaml" {
+				printYAML(events)
+				return
+			}
+
+			// Simple display for events
+			for _, ev := range events {
+				m, ok := ev.(map[string]any)
+				if !ok {
+					continue
+				}
+				evType, _ := m["type"].(string)
+				timestamp, _ := m["timestamp"].(string)
+				data, _ := m["data"].(map[string]any)
+
+				switch evType {
+				case "user.message":
+					content, _ := data["content"].(string)
+					fmt.Printf("[%s] User: %s\n", timestamp, content)
+				case "agent.message":
+					content, _ := data["content"].(string)
+					fmt.Printf("[%s] Agent: %s\n", timestamp, content)
+				case "session.start":
+					context, _ := data["context"].(map[string]any)
+					cwd, _ := context["cwd"].(string)
+					fmt.Printf("[%s] Session Start (CWD: %s)\n", timestamp, cwd)
+				default:
+					fmt.Printf("[%s] Event: %s\n", timestamp, evType)
+				}
+			}
+			return
+		}
+	}
+
+	log.Printf("No local events found for session %s and SDK method is currently unavailable", sessionID)
 }
 
 func getTerminalWidth() int {
