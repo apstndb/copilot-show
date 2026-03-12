@@ -1,4 +1,4 @@
-module copilot-show
+module github.com/apstndb/copilot-show
 
 go 1.26.1
 
