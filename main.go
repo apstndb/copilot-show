@@ -756,8 +756,8 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 	lastID, _ := client.GetLastSessionID(ctx)
 	fgID, _ := client.GetForegroundSessionID(ctx)
 
-	// Try to scan local session-state directory for additional info (e.g., PID locks)
-	localStates := make(map[string]string)
+	// Scan local session-state directory for additional info (e.g., PID locks)
+	localStates := make(map[string][]string) // SessionID -> list of PIDs
 	home, _ := os.UserHomeDir()
 	stateDir := filepath.Join(home, ".copilot", "session-state")
 	entries, _ := os.ReadDir(stateDir)
@@ -768,7 +768,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 			for _, sub := range subEntries {
 				if strings.HasPrefix(sub.Name(), "inuse.") && strings.HasSuffix(sub.Name(), ".lock") {
 					pid := strings.TrimSuffix(strings.TrimPrefix(sub.Name(), "inuse."), ".lock")
-					localStates[sessionID] = pid
+					localStates[sessionID] = append(localStates[sessionID], pid)
 				}
 			}
 		}
@@ -779,7 +779,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 			Sessions          []copilot.SessionMetadata `json:"sessions" yaml:"sessions"`
 			LastSessionID     *string                   `json:"lastSessionId" yaml:"lastSessionId"`
 			ForegroundSession *string                   `json:"foregroundSessionId" yaml:"foregroundSessionId"`
-			LocalPIDs         map[string]string         `json:"localPids" yaml:"localPids"`
+			LocalPIDs         map[string][]string       `json:"localPids" yaml:"localPids"`
 		}{
 			Sessions:          sessions,
 			LastSessionID:     lastID,
@@ -791,7 +791,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
-	header := []string{"ID", "CWD", "StartTime", "ModifiedTime", "Status", "PID"}
+	header := []string{"ID", "CWD", "StartTime", "ModifiedTime", "Status", "PIDs"}
 	configureTable(table, header, nil)
 
 	for _, s := range sessions {
@@ -810,9 +810,31 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 			status += "[Foreground]"
 		}
 
-		pid := "-"
-		if p, ok := localStates[s.SessionID]; ok {
-			pid = p
+		pids := "-"
+		if ps, ok := localStates[s.SessionID]; ok {
+			pids = strings.Join(ps, ", ")
+			// Check if any PID is actually alive
+			alive := false
+			for _, pidStr := range ps {
+				pid, _ := strconv.Atoi(pidStr)
+				if pid > 0 {
+					// On Unix, signal 0 checks for process existence
+					process, err := os.FindProcess(pid)
+					if err == nil {
+						// On Unix, Signal(0) checks if process is alive
+						if err := process.Signal(os.Signal(nil)); err == nil {
+							alive = true
+							break
+						}
+					}
+				}
+			}
+			if alive {
+				if status != "" {
+					status += " "
+				}
+				status += "[Running]"
+			}
 		}
 
 		table.Append([]string{
@@ -821,7 +843,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 			s.StartTime,
 			s.ModifiedTime,
 			status,
-			pid,
+			pids,
 		})
 	}
 	table.Render()
@@ -837,12 +859,20 @@ func newHistoryCmd(client *copilot.Client) *cobra.Command {
 			if len(args) > 0 {
 				sessionID = args[0]
 			} else {
-				lastID, err := client.GetLastSessionID(cmd.Context())
-				if err != nil || lastID == nil {
-					log.Printf("No session ID provided and no last session found")
+				// 1. Check Foreground
+				if fg, _ := client.GetForegroundSessionID(cmd.Context()); fg != nil {
+					sessionID = *fg
+				} else {
+					// 2. Check Last
+					if last, _ := client.GetLastSessionID(cmd.Context()); last != nil {
+						sessionID = *last
+					}
+				}
+
+				if sessionID == "" {
+					log.Printf("No session ID provided and no foreground/last session found")
 					return
 				}
-				sessionID = *lastID
 			}
 			showHistory(cmd.Context(), client, sessionID, outputFormat)
 		},
