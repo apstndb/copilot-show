@@ -5,16 +5,16 @@ It is built on top of [github.com/github/copilot-sdk/go](https://github.com/gith
 
 ## Installation
 
+Install via `go install` (ensure your `GOPATH/bin` is in `PATH`):
+
 ```bash
 go install github.com/apstndb/copilot-show@latest
 ```
 
-*Note: Since this is currently under development, you can also build from source:*
+Or using `mise`:
 
 ```bash
-git clone https://github.com/apstndb/copilot-show
-cd copilot-show
-go install .
+mise use -g go:github.com/apstndb/copilot-show@latest
 ```
 
 ## Usage
@@ -79,7 +79,7 @@ copilot-show quota -f yaml
 
 The following commands are hidden by default but can be executed by specifying their names:
 
-- `agents`: List available Copilot agents (See [AGENTS.md](./AGENTS.md) for details)
+- `agents`: List available Copilot agents
 - `current-model`: Show the currently selected model ID
 - `current-agent`: Show the currently selected agent
 - `mode`: Show the current agent mode
