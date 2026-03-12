@@ -90,6 +90,8 @@ func configureTable(table *tablewriter.Table, header []string, rightAlignedCols 
 	table.Configure(func(cfg *tablewriter.Config) {
 		cfg.MaxWidth = getTerminalWidth()
 		cfg.Row.Formatting.AutoWrap = tw.WrapNormal
+		cfg.Row.Formatting.AutoFormat = tw.Off
+		cfg.Header.Formatting.AutoFormat = tw.Off
 		cfg.Header.Alignment.Global = tw.AlignLeft
 		if len(rightAlignedCols) > 0 {
 			cfg.Row.Alignment.PerColumn = make([]tw.Align, len(header))
@@ -791,7 +793,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	table := tablewriter.NewWriter(os.Stdout)
-	header := []string{"ID", "CWD", "StartTime", "ModifiedTime", "Status", "PIDs"}
+	header := []string{"ID", "CWD", "Start Time", "Modified Time", "Status", "PIDs"}
 	configureTable(table, header, nil)
 
 	for _, s := range sessions {
