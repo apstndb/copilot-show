@@ -23,7 +23,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "0.1.0"
+const version = "0.1.4"
 
 var (
 	outputFormat string
@@ -52,6 +52,7 @@ func main() {
 	rootCmd.AddCommand(newQuotaCmd(client))
 	rootCmd.AddCommand(newModelsCmd(client))
 	rootCmd.AddCommand(newToolsCmd(client))
+	rootCmd.AddCommand(newStatsCmd())
 
 	hiddenCmds := []*cobra.Command{
 		newAgentsCmd(client),
@@ -882,61 +883,243 @@ func newHistoryCmd(client *copilot.Client) *cobra.Command {
 }
 
 func showHistory(ctx context.Context, client *copilot.Client, sessionID string, format string) {
-	// SDK workaround: we need a way to call session.getMessages without a Session object
-	// since we only have sessionID. client.RPC is ServerRpc which doesn't have SessionRpc.
-	// We'll try to read local events.jsonl as a fallback/primary source since we analyzed it.
-
 	home, _ := os.UserHomeDir()
 	eventsPath := filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
 
-	if _, err := os.Stat(eventsPath); err == nil {
-		f, err := os.Open(eventsPath)
-		if err == nil {
-			defer f.Close()
-			scanner := bufio.NewScanner(f)
-			var events []any
-			for scanner.Scan() {
-				var ev any
-				if err := json.Unmarshal(scanner.Bytes(), &ev); err == nil {
-					events = append(events, ev)
-				}
-			}
+	if _, err := os.Stat(eventsPath); err != nil {
+		log.Printf("No local events found for session %s", sessionID)
+		return
+	}
 
-			if format == "yaml" {
-				printYAML(events)
-				return
-			}
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		log.Printf("Error opening events file: %v", err)
+		return
+	}
+	defer f.Close()
 
-			// Simple display for events
-			for _, ev := range events {
-				m, ok := ev.(map[string]any)
-				if !ok {
-					continue
-				}
-				evType, _ := m["type"].(string)
-				timestamp, _ := m["timestamp"].(string)
-				data, _ := m["data"].(map[string]any)
+	scanner := bufio.NewScanner(f)
+	var events []map[string]any
+	eventMap := make(map[string]map[string]any)
 
-				switch evType {
-				case "user.message":
-					content, _ := data["content"].(string)
-					fmt.Printf("[%s] User: %s\n", timestamp, content)
-				case "agent.message":
-					content, _ := data["content"].(string)
-					fmt.Printf("[%s] Agent: %s\n", timestamp, content)
-				case "session.start":
-					context, _ := data["context"].(map[string]any)
-					cwd, _ := context["cwd"].(string)
-					fmt.Printf("[%s] Session Start (CWD: %s)\n", timestamp, cwd)
-				default:
-					fmt.Printf("[%s] Event: %s\n", timestamp, evType)
-				}
+	for scanner.Scan() {
+		var ev map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err == nil {
+			events = append(events, ev)
+			if id, ok := ev["id"].(string); ok {
+				eventMap[id] = ev
 			}
-			return
 		}
 	}
 
-	log.Printf("No local events found for session %s and SDK method is currently unavailable", sessionID)
+	if format == "yaml" {
+		printYAML(events)
+		return
+	}
+
+	// Build a simple tree for indentation and latency
+	// We'll also calculate latency from parent or previous event
+	var prevTs time.Time
+
+	for i, ev := range events {
+		evType, _ := ev["type"].(string)
+		id, _ := ev["id"].(string)
+		parentId, _ := ev["parentId"].(string)
+		timestampStr, _ := ev["timestamp"].(string)
+		data, _ := ev["data"].(map[string]any)
+
+		ts, _ := time.Parse(time.RFC3339, timestampStr)
+
+		// Calculate latency from parent if possible, else from previous event
+		var latencyStr string
+		if i > 0 {
+			latency := ts.Sub(prevTs)
+			latencyStr = fmt.Sprintf("+%v", latency.Round(time.Millisecond))
+		}
+		if parentId != "" {
+			if parent, ok := eventMap[parentId]; ok {
+				ptsStr, _ := parent["timestamp"].(string)
+				pts, err := time.Parse(time.RFC3339, ptsStr)
+				if err == nil {
+					pLatency := ts.Sub(pts)
+					latencyStr = fmt.Sprintf(" (p+%v)", pLatency.Round(time.Millisecond))
+				}
+			}
+		}
+		prevTs = ts
+
+		// Determine indentation (very simplified: root or not)
+		indent := ""
+		if parentId != "" {
+			indent = "  "
+		}
+
+		displayTs := ts.Local().Format("15:04:05.000")
+		prefix := fmt.Sprintf("[%s]%s %s", displayTs, latencyStr, indent)
+
+		switch evType {
+		case "user.message":
+			content, _ := data["content"].(string)
+			if content == "" {
+				content, _ = data["transformedContent"].(string)
+			}
+			fmt.Printf("%s User: %s\n", prefix, strings.ReplaceAll(content, "\n", " "))
+		case "assistant.message":
+			content, _ := data["content"].(string)
+			fmt.Printf("%s Assistant: %s\n", prefix, strings.ReplaceAll(content, "\n", " "))
+		case "tool.execution_start":
+			toolName, _ := data["toolName"].(string)
+			fmt.Printf("%s Tool Start: %s\n", prefix, toolName)
+		case "tool.execution_complete":
+			toolName, _ := data["toolName"].(string)
+			success, _ := data["success"].(bool)
+			fmt.Printf("%s Tool End: %s (Success: %v)\n", prefix, toolName, success)
+		case "session.start":
+			context, _ := data["context"].(map[string]any)
+			cwd, _ := context["cwd"].(string)
+			fmt.Printf("%s Session Start (CWD: %s)\n", prefix, cwd)
+		case "assistant.turn_start":
+			fmt.Printf("%s Assistant Turn Start\n", prefix)
+		case "assistant.turn_end":
+			fmt.Printf("%s Assistant Turn End\n", prefix)
+		case "session.shutdown":
+			total, _ := data["totalPremiumRequests"].(float64)
+			fmt.Printf("%s Session Shutdown (Total Premium Requests: %.0f)\n", prefix, total)
+			if metrics, ok := data["modelMetrics"].(map[string]any); ok {
+				for model, m := range metrics {
+					if mv, ok := m.(map[string]any); ok {
+						if reqs, ok := mv["requests"].(map[string]any); ok {
+							count, _ := reqs["count"].(float64)
+							cost, _ := reqs["cost"].(float64)
+							fmt.Printf("%s   Model: %s (Requests: %.0f, Cost: %.0f)\n", indent, model, count, cost)
+						}
+						if usage, ok := mv["usage"].(map[string]any); ok {
+							in, _ := usage["inputTokens"].(float64)
+							out, _ := usage["outputTokens"].(float64)
+							fmt.Printf("%s     Tokens: In: %.0f, Out: %.0f\n", indent, in, out)
+						}
+					}
+				}
+			}
+		case "abort":
+			fmt.Printf("%s Abort\n", prefix)
+		default:
+			fmt.Printf("%s Event: %s (%s)\n", prefix, evType, id)
+		}
+	}
+}
+
+func newStatsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stats",
+		Short: "Show aggregate usage statistics from local session history",
+		Run: func(cmd *cobra.Command, args []string) {
+			showStats(outputFormat)
+		},
+	}
+}
+
+func showStats(format string) {
+	home, _ := os.UserHomeDir()
+	stateDir := filepath.Join(home, ".copilot", "session-state")
+	entries, _ := os.ReadDir(stateDir)
+
+	type modelStat struct {
+		Requests int64 `json:"requests" yaml:"requests"`
+		Cost     int64 `json:"cost" yaml:"cost"`
+		Input    int64 `json:"inputTokens" yaml:"inputTokens"`
+		Output   int64 `json:"outputTokens" yaml:"outputTokens"`
+	}
+	stats := make(map[string]*modelStat)
+	var totalPremiumRequests int64
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		eventsPath := filepath.Join(stateDir, entry.Name(), "events.jsonl")
+		f, err := os.Open(eventsPath)
+		if err != nil {
+			continue
+		}
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			var ev map[string]any
+			if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+				continue
+			}
+			if ev["type"] != "session.shutdown" {
+				continue
+			}
+			data, _ := ev["data"].(map[string]any)
+			if data == nil {
+				continue
+			}
+			if total, ok := data["totalPremiumRequests"].(float64); ok {
+				totalPremiumRequests += int64(total)
+			}
+			if metrics, ok := data["modelMetrics"].(map[string]any); ok {
+				for model, m := range metrics {
+					if mv, ok := m.(map[string]any); ok {
+						if _, ok := stats[model]; !ok {
+							stats[model] = &modelStat{}
+						}
+						s := stats[model]
+						if reqs, ok := mv["requests"].(map[string]any); ok {
+							count, _ := reqs["count"].(float64)
+							cost, _ := reqs["cost"].(float64)
+							s.Requests += int64(count)
+							s.Cost += int64(cost)
+						}
+						if usage, ok := mv["usage"].(map[string]any); ok {
+							in, _ := usage["inputTokens"].(float64)
+							out, _ := usage["outputTokens"].(float64)
+							s.Input += int64(in)
+							s.Output += int64(out)
+						}
+					}
+				}
+			}
+		}
+		f.Close()
+	}
+
+	if format == "yaml" {
+		printYAML(map[string]any{
+			"totalPremiumRequests": totalPremiumRequests,
+			"modelStats":           stats,
+		})
+		return
+	}
+
+	fmt.Printf("Total Premium Requests (Local History): %d\n\n", totalPremiumRequests)
+	if len(stats) == 0 {
+		fmt.Println("No detailed model statistics found in history.")
+		return
+	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	header := []string{"Model", "Requests", "Premium Requests (Cost)", "Input Tokens", "Output Tokens"}
+	configureTable(table, header, []int{1, 2, 3, 4})
+
+	var models []string
+	for m := range stats {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+
+	for _, m := range models {
+		s := stats[m]
+		table.Append([]string{
+			m,
+			strconv.FormatInt(s.Requests, 10),
+			strconv.FormatInt(s.Cost, 10),
+			strconv.FormatInt(s.Input, 10),
+			strconv.FormatInt(s.Output, 10),
+		})
+	}
+	table.Render()
 }
 
 func getTerminalWidth() int {
