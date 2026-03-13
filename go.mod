@@ -5,6 +5,7 @@ go 1.26.1
 require (
 	github.com/github/copilot-sdk/go v0.1.33-0.20260311135713-ab8cc5a8cdf4
 	github.com/goccy/go-yaml v1.19.2
+	github.com/maruel/natural v1.3.0
 	github.com/olekukonko/tablewriter v1.1.3
 	github.com/olekukonko/ts v0.0.0-20171002115256-78ecb04241c0
 	github.com/spf13/cobra v1.10.2

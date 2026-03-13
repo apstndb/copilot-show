@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,16 +18,20 @@ import (
 	"github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
 	"github.com/goccy/go-yaml"
+	"github.com/maruel/natural"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
 	"github.com/olekukonko/ts"
 	"github.com/spf13/cobra"
 )
 
-const version = "0.1.4"
+const version = "0.1.5"
 
 var (
 	outputFormat string
+	tableMode    string
+	uiVersion    string
 )
 
 func main() {
@@ -48,11 +53,15 @@ func main() {
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&outputFormat, "format", "f", "table", "Output format (table, yaml)")
+	rootCmd.PersistentFlags().StringVar(&tableMode, "table-mode", "default", "Table mode (default, ascii, markdown)")
+	rootCmd.PersistentFlags().StringVar(&uiVersion, "ui-version", "v2", "UI version for A/B testing (v1, v2)")
 
 	rootCmd.AddCommand(newQuotaCmd(client))
 	rootCmd.AddCommand(newModelsCmd(client))
 	rootCmd.AddCommand(newToolsCmd(client))
 	rootCmd.AddCommand(newStatsCmd())
+	rootCmd.AddCommand(newUsageCmd(client))
+	rootCmd.AddCommand(newTurnsCmd(client))
 
 	hiddenCmds := []*cobra.Command{
 		newAgentsCmd(client),
@@ -66,6 +75,7 @@ func main() {
 		newStatusCmd(client),
 		newSessionsCmd(client),
 		newHistoryCmd(client),
+		newTurnsCmd(client),
 	}
 	for _, c := range hiddenCmds {
 		c.Hidden = true
@@ -87,13 +97,48 @@ func printYAML(v interface{}) {
 	fmt.Print(string(data))
 }
 
-func configureTable(table *tablewriter.Table, header []string, rightAlignedCols []int) {
+func createTable(header []string, rightAlignedCols []int, hierarchicalMerge bool, rowLine bool) *tablewriter.Table {
+	var opts []tablewriter.Option
+
+	if uiVersion == "v2" {
+		if tableMode == "markdown" {
+			opts = append(opts, tablewriter.WithRenderer(renderer.NewMarkdown()))
+		} else if tableMode == "ascii" {
+			opts = append(opts, tablewriter.WithRenderer(renderer.NewBlueprint(tw.Rendition{
+				Symbols: tw.NewSymbols(tw.StyleASCII),
+			})))
+		}
+
+		if rowLine {
+			opts = append(opts, tablewriter.WithRendition(tw.Rendition{
+				Settings: tw.Settings{
+					Separators: tw.Separators{
+						BetweenRows: tw.On,
+					},
+				},
+			}))
+		}
+	} else {
+		// v1 (Legacy) simple table style
+		if tableMode == "markdown" {
+			opts = append(opts, tablewriter.WithRenderer(renderer.NewMarkdown()))
+		} else if tableMode == "ascii" {
+			// tablewriter v1.1.3 doesn't have a simple ascii renderer, but we can use default
+		}
+	}
+
+	table := tablewriter.NewTable(os.Stdout, opts...)
+
 	table.Configure(func(cfg *tablewriter.Config) {
-		cfg.MaxWidth = getTerminalWidth()
 		cfg.Row.Formatting.AutoWrap = tw.WrapNormal
 		cfg.Row.Formatting.AutoFormat = tw.Off
 		cfg.Header.Formatting.AutoFormat = tw.Off
 		cfg.Header.Alignment.Global = tw.AlignLeft
+
+		if uiVersion == "v2" && hierarchicalMerge {
+			cfg.Row.Merging.Mode = tw.MergeHierarchical
+		}
+
 		if len(rightAlignedCols) > 0 {
 			cfg.Row.Alignment.PerColumn = make([]tw.Align, len(header))
 			for i := range cfg.Row.Alignment.PerColumn {
@@ -106,11 +151,13 @@ func configureTable(table *tablewriter.Table, header []string, rightAlignedCols 
 			}
 		}
 	})
+
 	anyHeader := make([]interface{}, len(header))
 	for i, v := range header {
 		anyHeader[i] = v
 	}
 	table.Header(anyHeader...)
+	return table
 }
 
 func withSession(ctx context.Context, client *copilot.Client, fn func(session *copilot.Session) error) error {
@@ -148,9 +195,8 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 		return
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
-	header := []string{"Metric", "Entitlement", "Used", "Overage", "Usage %"}
-	configureTable(table, header, []int{1, 2, 3, 4})
+	header := []string{"Metric", "Included", "Used", "Overage", "Usage %"}
+	table := createTable(header, []int{1, 2, 3, 4}, false, false)
 
 	// Sort snapshots by name for consistent output
 	var keys []string
@@ -221,7 +267,7 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	// Add educational notes based on documentation
-	fmt.Println("\nPlan Reference (Approximate Monthly Entitlement):")
+	fmt.Println("\nPlan Reference (Included Monthly Premium Requests):")
 	fmt.Println("- Copilot Free: 50")
 	fmt.Println("- Copilot Pro / Business: 300")
 	fmt.Println("- Copilot Enterprise: 1,000")
@@ -238,9 +284,31 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	monthProgress := math.Min(100, math.Max(0, (secondsPassed/totalSecondsInMonth)*100))
 
 	fmt.Printf("\nMonth Progress (UTC): %.1f%%\n", monthProgress)
-	fmt.Println("Note: Quotas reset on the 1st of each month at 00:00 UTC.")
-	fmt.Println("Note: 'Overage' shows the overage amount and whether it is permitted.")
-	fmt.Println("Note: Each interaction's cost depends on the model's multiplier (e.g., Claude 4.6 Opus is 3x).")
+
+	// Overage cost estimation based on quota snapshots
+	var totalOverage float64
+	overagePossible := false
+	for _, snap := range quota.QuotaSnapshots {
+		if snap.Overage > 0 {
+			totalOverage += snap.Overage
+		}
+		if snap.OverageAllowedWithExhaustedQuota {
+			overagePossible = true
+		}
+	}
+
+	if totalOverage > 0 {
+		fmt.Printf("Estimated Overage Cost (at $0.04/req): $%.2f USD\n", totalOverage*0.04)
+	} else if overagePossible {
+		fmt.Println("Overage is allowed. Future overage cost: $0.04 USD per premium request.")
+	}
+
+	fmt.Println("\nNotes:")
+	fmt.Println("- Quotas reset on the 1st of each month at 00:00 UTC.")
+	fmt.Println("- 'Overage' shows the extra usage after exhausting your included requests.")
+	fmt.Println("- Each interaction's cost depends on the model's multiplier.")
+	fmt.Println("- Standard models (e.g., GPT-4o, Claude 4.5 Sonnet) are often 'Included' at 0 cost.")
+	fmt.Println("- Premium models (e.g., Claude 4.6 Opus, o1) have a multiplier (e.g., 3x).")
 }
 
 func newModelsCmd(client *copilot.Client) *cobra.Command {
@@ -265,14 +333,15 @@ func showModels(ctx context.Context, client *copilot.Client, format string) {
 		return
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
 	header := []string{"ID", "Name", "Multiplier", "Context", "Output", "Prompt", "Vision", "Reasoning", "Efforts", "State"}
-	configureTable(table, header, []int{2, 3, 4, 5})
+	table := createTable(header, []int{2, 3, 4, 5}, false, false)
 
 	for _, m := range models.Models {
 		multiplier := "-"
+		multiplierNum := 0.0
 		if m.Billing != nil {
-			multiplier = strconv.FormatFloat(m.Billing.Multiplier, 'f', -1, 64)
+			multiplierNum = m.Billing.Multiplier
+			multiplier = strconv.FormatFloat(multiplierNum, 'f', -1, 64)
 		}
 
 		ctxTokens := fmt.Sprintf("%.0f", m.Capabilities.Limits.MaxContextWindowTokens)
@@ -316,7 +385,7 @@ func showModels(ctx context.Context, client *copilot.Client, format string) {
 			policyState = m.Policy.State
 		}
 
-		table.Append([]string{
+		row := []string{
 			m.ID,
 			m.Name,
 			multiplier,
@@ -327,9 +396,18 @@ func showModels(ctx context.Context, client *copilot.Client, format string) {
 			reasoning,
 			efforts,
 			policyState,
-		})
+		}
+
+		if multiplierNum == 0 && (policyState == "enabled" || policyState == "default") {
+			// Included models (Free/No premium request cost)
+			row[2] = "Included (0)"
+		}
+
+		table.Append(row)
 	}
 	table.Render()
+	fmt.Println("\nNote: 'Included' models (e.g., GPT-4o, Claude 4.5 Sonnet) consume ZERO premium requests on paid plans.")
+	fmt.Println("Note: Premium models (e.g., Claude 4.6 Opus, o1) consume premium requests based on their multiplier.")
 }
 
 func newToolsCmd(client *copilot.Client) *cobra.Command {
@@ -354,9 +432,8 @@ func showTools(ctx context.Context, client *copilot.Client, format string) {
 		return
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
 	header := []string{"Name", "Description", "Namespaced Name"}
-	configureTable(table, header, nil)
+	table := createTable(header, nil, false, false)
 
 	for _, t := range tools.Tools {
 		nsName := "-"
@@ -391,9 +468,8 @@ func showAgents(ctx context.Context, client *copilot.Client, format string) {
 			return nil
 		}
 
-		table := tablewriter.NewWriter(os.Stdout)
 		header := []string{"Name", "Display Name", "Description"}
-		configureTable(table, header, nil)
+		table := createTable(header, nil, false, false)
 
 		for _, a := range res.Agents {
 			table.Append([]string{a.Name, a.DisplayName, a.Description})
@@ -526,7 +602,7 @@ func showWorkspace(ctx context.Context, client *copilot.Client, format string, s
 		table := tablewriter.NewWriter(os.Stdout)
 		if showAll {
 			header := []string{"File Path", "Content (Truncated)"}
-			configureTable(table, header, nil)
+			table := createTable(header, nil, false, false)
 			for _, f := range result {
 				c := "-"
 				if f.Content != nil {
@@ -539,7 +615,7 @@ func showWorkspace(ctx context.Context, client *copilot.Client, format string, s
 			}
 		} else {
 			header := []string{"File Path"}
-			configureTable(table, header, nil)
+			table := createTable(header, nil, false, false)
 			for _, f := range result {
 				table.Append([]string{f.Path})
 			}
@@ -720,15 +796,13 @@ func showStatus(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	fmt.Println("--- CLI Status ---")
-	table := tablewriter.NewWriter(os.Stdout)
-	configureTable(table, []string{"Property", "Value"}, nil)
+	table := createTable([]string{"Property", "Value"}, nil, false, false)
 	table.Append([]string{"Version", status.Version})
 	table.Append([]string{"Protocol Version", fmt.Sprintf("%d", status.ProtocolVersion)})
 	table.Render()
 
 	fmt.Println("\n--- Auth Status ---")
-	tableAuth := tablewriter.NewWriter(os.Stdout)
-	configureTable(tableAuth, []string{"Property", "Value"}, nil)
+	tableAuth := createTable([]string{"Property", "Value"}, nil, false, false)
 	tableAuth.Append([]string{"Authenticated", fmt.Sprintf("%v", auth.IsAuthenticated)})
 	if auth.Login != nil {
 		tableAuth.Append([]string{"Login", *auth.Login})
@@ -793,9 +867,8 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 		return
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
 	header := []string{"ID", "CWD", "Start Time", "Modified Time", "Status", "PIDs"}
-	configureTable(table, header, nil)
+	table := createTable(header, nil, false, false)
 
 	for _, s := range sessions {
 		cwd := "-"
@@ -972,8 +1045,13 @@ func showHistory(ctx context.Context, client *copilot.Client, sessionID string, 
 			fmt.Printf("%s Tool Start: %s\n", prefix, toolName)
 		case "tool.execution_complete":
 			toolName, _ := data["toolName"].(string)
+			model, _ := data["model"].(string)
 			success, _ := data["success"].(bool)
-			fmt.Printf("%s Tool End: %s (Success: %v)\n", prefix, toolName, success)
+			modelStr := ""
+			if model != "" {
+				modelStr = fmt.Sprintf(" [%s]", model)
+			}
+			fmt.Printf("%s Tool End: %s%s (Success: %v)\n", prefix, toolName, modelStr, success)
 		case "session.start":
 			context, _ := data["context"].(map[string]any)
 			cwd, _ := context["cwd"].(string)
@@ -1009,17 +1087,603 @@ func showHistory(ctx context.Context, client *copilot.Client, sessionID string, 
 	}
 }
 
-func newStatsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stats",
-		Short: "Show aggregate usage statistics from local session history",
+func newUsageCmd(client *copilot.Client) *cobra.Command {
+	var year, month, day, last int
+	var product, model, sortOrder string
+	cmd := &cobra.Command{
+		Use:   "usage",
+		Short: "Show detailed billing usage from GitHub API",
 		Run: func(cmd *cobra.Command, args []string) {
-			showStats(outputFormat)
+			now := time.Now().UTC()
+			// Flag parsing logic for drill down
+			// If finer grain is specified but coarser is not, use current values
+			if cmd.Flags().Changed("day") {
+				if !cmd.Flags().Changed("month") {
+					month = int(now.Month())
+				}
+				if !cmd.Flags().Changed("year") {
+					year = now.Year()
+				}
+			} else if cmd.Flags().Changed("month") {
+				if !cmd.Flags().Changed("year") {
+					year = now.Year()
+				}
+			} else if !cmd.Flags().Changed("year") {
+				// No flags specified: default to current month
+				year = now.Year()
+				month = int(now.Month())
+			}
+
+			// Handle relative dates
+			if day < 0 {
+				targetDate := now.AddDate(0, 0, day)
+				year = targetDate.Year()
+				month = int(targetDate.Month())
+				day = targetDate.Day()
+			} else if month < 0 {
+				targetDate := now.AddDate(0, month, 0)
+				year = targetDate.Year()
+				month = int(targetDate.Month())
+				// If month is relative, usually day should be 0 (monthly report)
+				// but let's see if we want to keep current day or not.
+				// Based on previous drill-down logic:
+				if !cmd.Flags().Changed("day") {
+					day = 0
+				}
+			} else if year < 0 {
+				targetDate := now.AddDate(year, 0, 0)
+				year = targetDate.Year()
+				// Usually annual report if only year is specified
+				if !cmd.Flags().Changed("month") {
+					month = 0
+				}
+				if !cmd.Flags().Changed("day") {
+					day = 0
+				}
+			}
+
+			showUsage(cmd.Context(), client, outputFormat, year, month, day, product, model, last, sortOrder)
+		},
+	}
+	cmd.Flags().IntVarP(&year, "year", "y", 0, "Year for usage report (positive for absolute, negative for relative)")
+	cmd.Flags().IntVarP(&month, "month", "m", 0, "Month for usage report (1-12, or negative for relative)")
+	cmd.Flags().IntVarP(&day, "day", "d", 0, "Day for usage report (1-31, or negative for relative)")
+	cmd.Flags().IntVarP(&last, "last", "L", 0, "Show reports for the last N periods (days, months, or years)")
+	cmd.Flags().StringVarP(&product, "product", "p", "", "Product to filter (e.g., copilot, spark)")
+	cmd.Flags().MarkHidden("product")
+	cmd.Flags().StringVarP(&model, "model", "M", "", "Model to filter (e.g., gpt-5, claude-opus-4.6)")
+	cmd.Flags().MarkHidden("model")
+	cmd.Flags().StringVar(&sortOrder, "sort-order", "desc", "Sort order for Period (asc, desc)")
+	return cmd
+}
+
+type usageResponse struct {
+	TimePeriod struct {
+		Year  int  `json:"year" yaml:"year"`
+		Month *int `json:"month" yaml:"month"`
+		Day   *int `json:"day" yaml:"day"`
+	} `json:"timePeriod" yaml:"timePeriod"`
+	User       string `json:"user" yaml:"user"`
+	UsageItems []struct {
+		Product          string  `json:"product" yaml:"product"`
+		SKU              string  `json:"sku" yaml:"sku"`
+		Model            string  `json:"model" yaml:"model"`
+		UnitType         string  `json:"unitType" yaml:"unitType"`
+		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
+		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
+		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
+		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
+		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
+		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
+		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
+	} `json:"usageItems" yaml:"usageItems"`
+}
+
+func fetchUsage(username string, year, month, day int, product, model string) (*usageResponse, error) {
+	// Execute billing usage API command
+	path := fmt.Sprintf("/users/%s/settings/billing/premium_request/usage?year=%d", username, year)
+	if month > 0 {
+		path += fmt.Sprintf("&month=%d", month)
+	}
+	if day > 0 {
+		path += fmt.Sprintf("&day=%d", day)
+	}
+	if product != "" {
+		path += fmt.Sprintf("&product=%s", product)
+	}
+	if model != "" {
+		path += fmt.Sprintf("&model=%s", model)
+	}
+
+	cmd := exec.Command("gh", "api", path)
+	out, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("Error: %s", string(exitErr.Stderr))
+		}
+		return nil, fmt.Errorf("Error executing gh api: %v", err)
+	}
+
+	var res usageResponse
+	if err := json.Unmarshal(out, &res); err != nil {
+		return nil, fmt.Errorf("Error unmarshaling API response: %v", err)
+	}
+	return &res, nil
+}
+
+func showUsage(ctx context.Context, client *copilot.Client, format string, year, month, day int, product, model string, last int, sortOrder string) {
+	// 1. Get current username
+	userCmd := exec.Command("gh", "api", "/user", "--jq", ".login")
+	userOut, err := userCmd.Output()
+	if err != nil {
+		log.Printf("Error fetching username: %v", err)
+		return
+	}
+	username := strings.TrimSpace(string(userOut))
+
+	var responses []*usageResponse
+
+	targetDate := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	if month == 0 {
+		targetDate = time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	if day > 0 {
+		targetDate = time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+	}
+
+	if last > 0 {
+		for i := 0; i < last; i++ {
+			var y, m, d int
+			if day > 0 {
+				// daily
+				date := targetDate.AddDate(0, 0, -i)
+				y, m, d = date.Year(), int(date.Month()), date.Day()
+			} else if month > 0 {
+				// monthly
+				date := targetDate.AddDate(0, -i, 0)
+				y, m, d = date.Year(), int(date.Month()), 0
+			} else {
+				// annual
+				date := targetDate.AddDate(-i, 0, 0)
+				y, m, d = date.Year(), 0, 0
+			}
+			res, err := fetchUsage(username, y, m, d, product, model)
+			if err != nil {
+				log.Printf("Failed to fetch usage for %d-%02d-%02d: %v", y, m, d, err)
+				continue
+			}
+			responses = append(responses, res)
+		}
+	} else {
+		res, err := fetchUsage(username, year, month, day, product, model)
+		if err != nil {
+			log.Print(err)
+			return
+		}
+		responses = append(responses, res)
+	}
+
+	if format == "yaml" {
+		if len(responses) == 1 {
+			printYAML(responses[0])
+		} else {
+			printYAML(responses)
+		}
+		return
+	}
+
+	if len(responses) == 0 {
+		fmt.Println("No usage data found.")
+		return
+	}
+
+	// Fetch models to join with usage (Left Join Multiplier)
+	multiplierMap := make(map[string]float64)
+	normalize := func(s string) string {
+		s = strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(s), " ", ""), "-", "")
+		return strings.TrimSuffix(s, "preview")
+	}
+
+	modelsList, err := client.RPC.Models.List(ctx)
+	if err == nil {
+		for _, m := range modelsList.Models {
+			if m.Billing != nil {
+				multiplierMap[normalize(m.Name)] = m.Billing.Multiplier
+				multiplierMap[normalize(m.ID)] = m.Billing.Multiplier
+			}
+		}
+	}
+
+	type usageItem struct {
+		Product          string  `json:"product" yaml:"product"`
+		SKU              string  `json:"sku" yaml:"sku"`
+		Model            string  `json:"model" yaml:"model"`
+		UnitType         string  `json:"unitType" yaml:"unitType"`
+		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
+		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
+		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
+		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
+		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
+		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
+		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
+		Period           string  `json:"-" yaml:"-"` // Not in API, used for sorting
+		Multiplier       string  `json:"multiplier,omitempty" yaml:"multiplier,omitempty"`
+	}
+
+	// Fetch included limit if available (for reference only, as it's for current month)
+	var entitlement float64
+	quotaRes, err := client.RPC.Account.GetQuota(ctx)
+	if err == nil {
+		if snap, ok := quotaRes.QuotaSnapshots["premium_interactions"]; ok {
+			entitlement = snap.EntitlementRequests
+		}
+	}
+
+	var usageItems []usageItem
+	for _, res := range responses {
+		periodStr := strconv.Itoa(res.TimePeriod.Year)
+		if res.TimePeriod.Month != nil {
+			periodStr = fmt.Sprintf("%d-%02d", res.TimePeriod.Year, *res.TimePeriod.Month)
+			if res.TimePeriod.Day != nil {
+				periodStr = fmt.Sprintf("%d-%02d-%02d", res.TimePeriod.Year, *res.TimePeriod.Month, *res.TimePeriod.Day)
+			}
+		}
+		for _, item := range res.UsageItems {
+			multiplier := "-"
+			if m, ok := multiplierMap[normalize(item.Model)]; ok {
+				multiplier = strconv.FormatFloat(m, 'f', -1, 64)
+				if m == 0 {
+					multiplier = "Included (0)"
+				}
+			}
+
+			usageItems = append(usageItems, usageItem{
+				Product:          item.Product,
+				SKU:              item.SKU,
+				Model:            item.Model,
+				UnitType:         item.UnitType,
+				PricePerUnit:     item.PricePerUnit,
+				GrossQuantity:    item.GrossQuantity,
+				GrossAmount:      item.GrossAmount,
+				DiscountQuantity: item.DiscountQuantity,
+				DiscountAmount:   item.DiscountAmount,
+				NetQuantity:      item.NetQuantity,
+				NetAmount:        item.NetAmount,
+				Period:           periodStr,
+				Multiplier:       multiplier,
+			})
+		}
+	}
+
+	// Sort usage items: Period (sortOrder), SKU ASC, Model ASC
+	sort.Slice(usageItems, func(i, j int) bool {
+		if usageItems[i].Period != usageItems[j].Period {
+			if strings.ToLower(sortOrder) == "asc" {
+				return usageItems[i].Period < usageItems[j].Period
+			}
+			return usageItems[i].Period > usageItems[j].Period
+		}
+		if uiVersion == "v2" {
+			if usageItems[i].SKU != usageItems[j].SKU {
+				return natural.Less(strings.ToLower(usageItems[i].SKU), strings.ToLower(usageItems[j].SKU))
+			}
+			return natural.Less(strings.ToLower(usageItems[i].Model), strings.ToLower(usageItems[j].Model))
+		}
+		// v1 (Legacy) simple lexicographical sort
+		if usageItems[i].SKU != usageItems[j].SKU {
+			return usageItems[i].SKU < usageItems[j].SKU
+		}
+		return usageItems[i].Model < usageItems[j].Model
+	})
+
+	// Group usage items: Period -> []item
+	var periods []string
+	periodGroups := make(map[string][]usageItem)
+	for _, item := range usageItems {
+		found := false
+		for _, p := range periods {
+			if p == item.Period {
+				found = true
+				break
+			}
+		}
+		if !found {
+			periods = append(periods, item.Period)
+		}
+		periodGroups[item.Period] = append(periodGroups[item.Period], item)
+	}
+
+	fmt.Printf("--- Billing Usage for %s (%s) ---\n", username, responses[0].User)
+	if entitlement > 0 {
+		fmt.Printf("Monthly Included Premium Requests (current plan): %s\n", strconv.FormatFloat(entitlement, 'f', -1, 64))
+	}
+	header := []string{"Period", "SKU", "Model", "Multiplier", "Used (req.)", "Billed (req.)", "Amount (USD)"}
+	if uiVersion == "v1" {
+		header = []string{"Period", "SKU", "Model", "Used (req.)", "Billed (req.)", "Amount (USD)"}
+	}
+	if last == 0 {
+		header = header[1:] // Remove Period column if only one response
+	}
+	table := createTable(header, []int{len(header) - 4, len(header) - 3, len(header) - 2, len(header) - 1}, uiVersion == "v2" && last > 0, uiVersion == "v2" && last > 0)
+
+	if uiVersion == "v2" {
+		for _, p := range periods {
+			items := periodGroups[p]
+			// Further group items by SKU within the period
+			var skus []string
+			skuGroups := make(map[string][]usageItem)
+			for _, item := range items {
+				found := false
+				for _, s := range skus {
+					if s == item.SKU {
+						found = true
+						break
+					}
+				}
+				if !found {
+					skus = append(skus, item.SKU)
+				}
+				skuGroups[item.SKU] = append(skuGroups[item.SKU], item)
+			}
+
+			var periodUsedTotal, periodBilledTotal, periodAmountTotal float64
+			for i, sku := range skus {
+				skuItems := skuGroups[sku]
+				var models, multipliers, useds, billeds, amounts []string
+				var skuUsedTotal, skuBilledTotal, skuAmountTotal float64
+				for _, item := range skuItems {
+					models = append(models, item.Model)
+					multipliers = append(multipliers, item.Multiplier)
+					useds = append(useds, strconv.FormatFloat(item.GrossQuantity, 'f', -1, 64))
+					billeds = append(billeds, strconv.FormatFloat(item.NetQuantity, 'f', -1, 64))
+					amounts = append(amounts, fmt.Sprintf("$%.2f", item.NetAmount))
+					skuUsedTotal += item.GrossQuantity
+					skuBilledTotal += item.NetQuantity
+					skuAmountTotal += item.NetAmount
+				}
+				periodUsedTotal += skuUsedTotal
+				periodBilledTotal += skuBilledTotal
+				periodAmountTotal += skuAmountTotal
+
+				row := []string{
+					p,
+					sku,
+					strings.Join(models, "\n"),
+					strings.Join(multipliers, "\n"),
+					strings.Join(useds, "\n"),
+					strings.Join(billeds, "\n"),
+					strings.Join(amounts, "\n"),
+				}
+
+				if last == 0 {
+					row = row[1:]
+				}
+				table.Append(row)
+
+				// If this is the last SKU in the period, add the Period Subtotal row
+				if i == len(skus)-1 {
+					subtotalRow := []string{
+						p,
+						"Subtotal (All SKUs)",
+						"", // Model
+						"", // Multiplier
+						strconv.FormatFloat(periodUsedTotal, 'f', -1, 64),
+						strconv.FormatFloat(periodBilledTotal, 'f', -1, 64),
+						fmt.Sprintf("$%.2f", periodAmountTotal),
+					}
+					if last == 0 {
+						subtotalRow = subtotalRow[1:]
+					}
+					table.Append(subtotalRow)
+				}
+			}
+		}
+	} else {
+		// v1 (Legacy) simple flat table
+		for _, item := range usageItems {
+			row := []string{
+				item.Period,
+				item.SKU,
+				item.Model,
+				strconv.FormatFloat(item.GrossQuantity, 'f', -1, 64),
+				strconv.FormatFloat(item.NetQuantity, 'f', -1, 64),
+				fmt.Sprintf("$%.2f", item.NetAmount),
+			}
+			if last == 0 {
+				row = row[1:]
+			}
+			table.Append(row)
+		}
+	}
+	table.Render()
+	fmt.Println("\nNotes:")
+	if uiVersion == "v2" {
+		fmt.Println("- 'Multiplier' is the request consumption rate per interaction for the model.")
+	}
+	fmt.Println("- 'Used (req.)' is the total premium requests consumed.")
+	fmt.Println("- 'Billed (req.)' is the overage amount you are billed for.")
+	fmt.Println("- 'Amount (USD)' is the total billed cost in USD.")
+	fmt.Println("- 'req.' stands for 'requests'.")
+}
+
+func newTurnsCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "turns [sessionID]",
+		Short: "Show turn-by-turn usage statistics for a session",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			var sessionID string
+			if len(args) > 0 {
+				sessionID = args[0]
+			} else {
+				if fg, _ := client.GetForegroundSessionID(cmd.Context()); fg != nil {
+					sessionID = *fg
+				} else if last, _ := client.GetLastSessionID(cmd.Context()); last != nil {
+					sessionID = *last
+				}
+				if sessionID == "" {
+					log.Printf("No session ID provided and no foreground/last session found")
+					return
+				}
+			}
+			showTurns(sessionID, outputFormat)
 		},
 	}
 }
 
-func showStats(format string) {
+func showTurns(sessionID string, format string) {
+	home, _ := os.UserHomeDir()
+	eventsPath := filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
+
+	if _, err := os.Stat(eventsPath); err != nil {
+		log.Printf("No local events found for session %s", sessionID)
+		return
+	}
+
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		log.Printf("Error opening events file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	type turnInfo struct {
+		TurnID    string            `json:"turnId" yaml:"turnId"`
+		StartTime time.Time         `json:"startTime" yaml:"startTime"`
+		EndTime   *time.Time        `json:"endTime,omitempty" yaml:"endTime,omitempty"`
+		Models    map[string]int    `json:"models" yaml:"models"` // model -> requests
+		Messages  []string          `json:"messages" yaml:"messages"`
+	}
+
+	var turns []*turnInfo
+	turnMap := make(map[string]*turnInfo) // interactionId -> turn
+	idToEvent := make(map[string]map[string]any)
+
+	for scanner.Scan() {
+		var ev map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
+			continue
+		}
+		id, _ := ev["id"].(string)
+		evType, _ := ev["type"].(string)
+		data, _ := ev["data"].(map[string]any)
+		ts, _ := time.Parse(time.RFC3339, ev["timestamp"].(string))
+		idToEvent[id] = ev
+
+		switch evType {
+		case "assistant.turn_start":
+			tID, _ := data["turnId"].(string)
+			iID, _ := data["interactionId"].(string)
+			turn := &turnInfo{
+				TurnID:    tID,
+				StartTime: ts,
+				Models:    make(map[string]int),
+			}
+			turns = append(turns, turn)
+			if iID != "" {
+				turnMap[iID] = turn
+			}
+		case "assistant.turn_end":
+			tID, _ := data["turnId"].(string)
+			// turn_end might not have interactionId, but parent/turn context can be used
+			// In our simplified model, the latest turn with matching ID might be it
+			for i := len(turns) - 1; i >= 0; i-- {
+				if turns[i].TurnID == tID && turns[i].EndTime == nil {
+					turns[i].EndTime = &ts
+					break
+				}
+			}
+		case "tool.execution_complete":
+			model, _ := data["model"].(string)
+			iID, _ := data["interactionId"].(string)
+			if model != "" && iID != "" {
+				if t, ok := turnMap[iID]; ok {
+					t.Models[model]++
+				}
+			}
+		case "user.message":
+			content, _ := data["content"].(string)
+			if content == "" {
+				content, _ = data["transformedContent"].(string)
+			}
+			// User message starts a sequence. We don't have interactionId yet, 
+			// but we can associate it with the next turn.
+			// (Simplified: just keep track of recent message)
+		case "assistant.message":
+			// Interaction ID is often available here too
+			iID, _ := data["interactionId"].(string)
+			if iID != "" {
+				if t, ok := turnMap[iID]; ok {
+					content, _ := data["content"].(string)
+					if content != "" {
+						t.Messages = append(t.Messages, content)
+					}
+				}
+			}
+		case "session.shutdown":
+			// shutdown metrics are session-wide
+		}
+	}
+
+	if format == "yaml" {
+		printYAML(turns)
+		return
+	}
+
+	fmt.Printf("--- Turn Usage for Session: %s ---\n", sessionID)
+	header := []string{"Turn", "Start Time", "Duration", "Model Calls", "Summary"}
+	table := createTable(header, nil, false, false)
+
+	for _, t := range turns {
+		duration := "-"
+		if t.EndTime != nil {
+			duration = t.EndTime.Sub(t.StartTime).Round(time.Millisecond).String()
+		}
+		
+		var models []string
+		for m, count := range t.Models {
+			models = append(models, fmt.Sprintf("%s (%d)", m, count))
+		}
+		sort.Strings(models)
+		modelStr := strings.Join(models, ", ")
+		if modelStr == "" {
+			modelStr = "-"
+		}
+
+		summary := "-"
+		if len(t.Messages) > 0 {
+			summary = t.Messages[0]
+			if len(summary) > 40 {
+				summary = summary[:40] + "..."
+			}
+		}
+
+		table.Append([]string{
+			t.TurnID,
+			t.StartTime.Local().Format("15:04:05"),
+			duration,
+			modelStr,
+			summary,
+		})
+	}
+	table.Render()
+}
+
+func newStatsCmd() *cobra.Command {
+	var showAllHistory bool
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show aggregate usage statistics from local session history",
+		Run: func(cmd *cobra.Command, args []string) {
+			showStats(outputFormat, showAllHistory)
+		},
+	}
+	cmd.Flags().BoolVarP(&showAllHistory, "all", "a", false, "Show statistics for all time (default: current month UTC)")
+	return cmd
+}
+
+func showStats(format string, showAllHistory bool) {
 	home, _ := os.UserHomeDir()
 	stateDir := filepath.Join(home, ".copilot", "session-state")
 	entries, _ := os.ReadDir(stateDir)
@@ -1033,6 +1697,9 @@ func showStats(format string) {
 	stats := make(map[string]*modelStat)
 	var totalPremiumRequests int64
 
+	now := time.Now().UTC()
+	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -1043,65 +1710,101 @@ func showStats(format string) {
 			continue
 		}
 
+		var sessionEvents []map[string]any
 		scanner := bufio.NewScanner(f)
+		hasShutdown := false
 		for scanner.Scan() {
 			var ev map[string]any
-			if err := json.Unmarshal(scanner.Bytes(), &ev); err != nil {
-				continue
-			}
-			if ev["type"] != "session.shutdown" {
-				continue
-			}
-			data, _ := ev["data"].(map[string]any)
-			if data == nil {
-				continue
-			}
-			if total, ok := data["totalPremiumRequests"].(float64); ok {
-				totalPremiumRequests += int64(total)
-			}
-			if metrics, ok := data["modelMetrics"].(map[string]any); ok {
-				for model, m := range metrics {
-					if mv, ok := m.(map[string]any); ok {
-						if _, ok := stats[model]; !ok {
-							stats[model] = &modelStat{}
-						}
-						s := stats[model]
-						if reqs, ok := mv["requests"].(map[string]any); ok {
-							count, _ := reqs["count"].(float64)
-							cost, _ := reqs["cost"].(float64)
-							s.Requests += int64(count)
-							s.Cost += int64(cost)
-						}
-						if usage, ok := mv["usage"].(map[string]any); ok {
-							in, _ := usage["inputTokens"].(float64)
-							out, _ := usage["outputTokens"].(float64)
-							s.Input += int64(in)
-							s.Output += int64(out)
-						}
-					}
+			if err := json.Unmarshal(scanner.Bytes(), &ev); err == nil {
+				sessionEvents = append(sessionEvents, ev)
+				if ev["type"] == "session.shutdown" {
+					hasShutdown = true
 				}
 			}
 		}
 		f.Close()
+
+		for _, ev := range sessionEvents {
+			if !showAllHistory {
+				timestampStr, _ := ev["timestamp"].(string)
+				ts, err := time.Parse(time.RFC3339, timestampStr)
+				if err == nil && ts.Before(startOfMonth) {
+					continue
+				}
+			}
+
+			data, _ := ev["data"].(map[string]any)
+			if data == nil {
+				continue
+			}
+
+			if ev["type"] == "session.shutdown" {
+				if total, ok := data["totalPremiumRequests"].(float64); ok {
+					totalPremiumRequests += int64(total)
+				}
+				if metrics, ok := data["modelMetrics"].(map[string]any); ok {
+					for model, m := range metrics {
+						if mv, ok := m.(map[string]any); ok {
+							if _, ok := stats[model]; !ok {
+								stats[model] = &modelStat{}
+							}
+							s := stats[model]
+							if reqs, ok := mv["requests"].(map[string]any); ok {
+								count, _ := reqs["count"].(float64)
+								cost, _ := reqs["cost"].(float64)
+								s.Requests += int64(count)
+								s.Cost += int64(cost)
+							}
+							if usage, ok := mv["usage"].(map[string]any); ok {
+								in, _ := usage["inputTokens"].(float64)
+								out, _ := usage["outputTokens"].(float64)
+								s.Input += int64(in)
+								s.Output += int64(out)
+							}
+						}
+					}
+				}
+			} else if !hasShutdown && ev["type"] == "tool.execution_complete" {
+				// Ongoing session: estimate from individual tool completions
+				model, _ := data["model"].(string)
+				if model != "" {
+					if _, ok := stats[model]; !ok {
+						stats[model] = &modelStat{}
+					}
+					s := stats[model]
+					s.Requests++
+					// Since we don't know the exact cost logic here (it's server side), 
+					// we just count it as 1 request.
+					// Note: This is an estimation for active sessions.
+				}
+			}
+		}
 	}
 
 	if format == "yaml" {
 		printYAML(map[string]any{
 			"totalPremiumRequests": totalPremiumRequests,
 			"modelStats":           stats,
+			"isCurrentMonthOnly":   !showAllHistory,
 		})
 		return
 	}
 
-	fmt.Printf("Total Premium Requests (Local History): %d\n\n", totalPremiumRequests)
+	title := "Total Premium Requests (Current Month UTC): %d\n\n"
+	if showAllHistory {
+		title = "Total Premium Requests (All Local History): %d\n\n"
+	}
+	fmt.Printf(title, totalPremiumRequests)
+
 	if len(stats) == 0 {
-		fmt.Println("No detailed model statistics found in history.")
+		fmt.Println("No detailed model statistics found for the selected period.")
 		return
 	}
 
-	table := tablewriter.NewWriter(os.Stdout)
-	header := []string{"Model", "Requests", "Premium Requests (Cost)", "Input Tokens", "Output Tokens"}
-	configureTable(table, header, []int{1, 2, 3, 4})
+	totalCostUSD := float64(totalPremiumRequests) * 0.04
+
+	header := []string{"Model", "Requests", "Premium Requests (Cost)", "Input Tokens", "Output Tokens", "Est. Overage Cost"}
+	table := createTable(header, []int{1, 2, 3, 4, 5}, false, false)
 
 	var models []string
 	for m := range stats {
@@ -1111,15 +1814,26 @@ func showStats(format string) {
 
 	for _, m := range models {
 		s := stats[m]
+		overageEst := fmt.Sprintf("$%.2f", float64(s.Cost)*0.04)
+		if s.Cost == 0 {
+			overageEst = "-"
+		}
 		table.Append([]string{
 			m,
 			strconv.FormatInt(s.Requests, 10),
 			strconv.FormatInt(s.Cost, 10),
 			strconv.FormatInt(s.Input, 10),
 			strconv.FormatInt(s.Output, 10),
+			overageEst,
 		})
 	}
 	table.Render()
+	if !showAllHistory {
+		fmt.Printf("\nEstimated Total Overage Cost (if quota is exhausted): $%.2f USD\n", totalCostUSD)
+	} else {
+		fmt.Printf("\nEstimated Total Overage Cost (across all history): $%.2f USD\n", totalCostUSD)
+	}
+	fmt.Println("Note: Cost estimation is based on $0.04 USD per premium request for overage usage.")
 }
 
 func getTerminalWidth() int {

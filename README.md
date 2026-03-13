@@ -17,9 +17,26 @@ Or using `mise`:
 mise use -g go:github.com/apstndb/copilot-show@latest
 ```
 
-## Usage
+### Usage
 
 Run the tool with a subcommand to inspect specific resources.
+
+Available subcommands:
+- `quota`: Show Copilot Premium Interactions usage and entitlement.
+- `models`: Show available models and their multipliers.
+- `tools`: Show available tools.
+- `usage`: Show billing usage report from GitHub API, with model multipliers and entitlement joined from the models list and quota snapshots.
+- `stats`: Show local usage statistics aggregated from session history.
+- `turns`: Show turn-by-turn usage statistics for a session.
+- `sessions`: List recent Copilot CLI sessions.
+- `history`: Show event history for a session.
+
+### Common Options
+
+Use `--format yaml` (or `-f yaml`) to get detailed raw data in YAML format.
+Use `--table-mode ascii` or `--table-mode markdown` to change the table rendering style.
+
+### Examples
 
 ### Quota Information
 
@@ -65,6 +82,45 @@ Lists built-in tools available to Copilot.
 
 ```bash
 copilot-show tools
+```
+
+### Usage Report
+
+Shows detailed billing usage for premium requests from the GitHub API (requires `gh` CLI).
+Displays grouped results by Period and SKU with subtotals, multipliers, and entitlement information (in UI v2).
+Supports relative date/month/year by specifying negative values (e.g., `-d -1` for yesterday).
+Multiple periods can be shown with the `--last` flag.
+The `Period` column can be sorted in ascending or descending order with the `--sort-order` flag (default is `desc`).
+
+```bash
+# Current month (default)
+copilot-show usage
+
+# Yesterday's report
+copilot-show usage -d -1
+
+# Last 7 days daily report
+copilot-show usage -d -1 --last 7
+
+# Last 3 months monthly reports
+copilot-show usage -m 0 --last 3
+```
+
+### Stats
+
+Aggregates usage statistics from local session history (`~/.copilot/session-state/*/events.jsonl`).
+Useful for understanding which models are consuming your quota.
+
+```bash
+copilot-show stats [-a]
+```
+
+### Turns
+
+Displays turn-by-turn usage statistics for a specific session.
+
+```bash
+copilot-show turns [sessionID]
 ```
 
 ### YAML Output

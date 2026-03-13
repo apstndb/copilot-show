@@ -26,3 +26,9 @@ Provide a transparent view into Copilot's runtime state, including:
 - Ensure all output-related subcommands support both `table` and `yaml` formats via the `--format` flag.
 - Keep "useful but cluttered" or internal-only information under `Hidden: true` subcommands.
 - Follow Go best practices and ensure `go mod tidy` is run after adding dependencies.
+- Never introduce new abbreviations in the code or UI without explicit user permission. (Exception: 'requests' may be abbreviated as 'req.' in table headers).
+- Use user-facing terminology in table headers (e.g., 'Used', 'Billed' instead of 'Gross', 'Net' in usage reports). Use 'Included' instead of 'Entitlement' for premium request limits.
+- All significant UI modifications (changes to table layouts, sorting, or new display formats) must support A/B testing.
+- Implement a mechanism (e.g., using the `--ui-version` flag) to toggle between the old ("v1") and new ("v2") implementations.
+- Keep both implementations temporarily to allow for side-by-side comparison and verification of the improvements.
+- Document the changes and the results of the A/B test before removing the old implementation.
