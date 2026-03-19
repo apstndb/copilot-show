@@ -28,7 +28,8 @@ Provide a transparent view into Copilot's runtime state, including:
 - Follow Go best practices and ensure `go mod tidy` is run after adding dependencies.
 - Never introduce new abbreviations in the code or UI without explicit user permission. (Exception: 'requests' may be abbreviated as 'req.' in table headers).
 - Use user-facing terminology in table headers (e.g., 'Used', 'Billed' instead of 'Gross', 'Net' in usage reports). Use 'Included' instead of 'Entitlement' for premium request limits.
-- All significant UI modifications (changes to table layouts, sorting, or new display formats) must support A/B testing.
-- Implement a mechanism (e.g., using the `--ui-version` flag) to toggle between the old ("v1") and new ("v2") implementations.
-- Keep both implementations temporarily to allow for side-by-side comparison and verification of the improvements.
-- Document the changes and the results of the A/B test before removing the old implementation.
+- All significant UI modifications (changes to table layouts, sorting, or new display formats) should support temporary A/B testing while they are being validated.
+- Use a reversible mechanism during that validation period so the old and new implementations can be compared side by side.
+- Once the new implementation is verified, keep a single default user-facing path.
+- If the A/B mechanism will be reused, keep the toggle hidden rather than removing and re-adding it.
+- Document the changes and the verification results when retiring or hiding the temporary A/B implementation.
