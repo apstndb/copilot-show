@@ -112,6 +112,7 @@ Aggregates usage statistics from local session history (`~/.copilot/session-stat
 Useful for understanding which models are consuming your quota.
 The `Premium Requests (Cost)` column preserves fractional multipliers such as `0.33`.
 Use `--api-costs` to estimate equivalent API cost from shutdown token usage, including cached token reads when the selected model has a verified cached-input price.
+Models without hardcoded API pricing still remain in the output; their API-cost cells stay empty and the printed total becomes a lower bound.
 Model availability is still plan-dependent, so local shutdown metrics can contain model IDs that are not currently visible in `copilot-show models`.
 
 ```bash

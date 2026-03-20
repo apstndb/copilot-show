@@ -3503,12 +3503,14 @@ func showStats(format string, showAllHistory bool, showAPICosts bool) {
 			payload["apiPricingSources"] = []string{
 				"https://developers.openai.com/api/docs/pricing",
 				"https://platform.claude.com/docs/en/about-claude/pricing",
+				"https://ai.google.dev/gemini-api/docs/pricing?hl=en",
 			}
 			payload["apiPricingAssumptions"] = []string{
 				"Estimates use hardcoded public API prices keyed by model ID.",
 				"Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.",
-				"OpenAI pricing uses the standard short-context tier; long-context, regional, and batch adjustments are not modeled.",
-				"Anthropic cache reads use published cache-hit prices; cache writes are not priced because duration is not persisted in session logs.",
+				"Rows are still shown when a model lacks API pricing; those rows keep request and token counts, while API totals become lower bounds.",
+				"OpenAI and Gemini pricing use standard short-context tiers; long-context, regional, storage, and batch adjustments are not modeled.",
+				"Anthropic cache reads and Gemini context-cache reads use published cached-input rates; cache writes and storage are not priced because duration is not persisted in session logs.",
 				"Active session tails without session.shutdown contribute request counts but not token-based costs.",
 			}
 			payload["modelCatalogSource"] = "https://docs.github.com/en/copilot/reference/ai-models/supported-models#model-multipliers"
@@ -3595,15 +3597,16 @@ func showStats(format string, showAllHistory bool, showAPICosts bool) {
 	fmt.Println("- Overage cost uses $0.04 USD per premium request.")
 	fmt.Println("- `Premium Requests (Cost)` can be fractional because model multipliers are preserved from session shutdown metrics.")
 	if showAPICosts {
-		fmt.Println("- API cost uses hardcoded public token prices from OpenAI and Anthropic docs.")
+		fmt.Println("- API cost uses hardcoded public token prices from OpenAI, Anthropic, and Google docs.")
 		fmt.Println("- Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.")
-		fmt.Println("- `Cache Read Tokens` are billed at cache-hit prices when the selected model has a verified cached-input rate.")
+		fmt.Println("- Models without API pricing still appear in the table; their `Est. API Cost` stays `-`, and the total becomes a lower bound.")
+		fmt.Println("- `Cache Read Tokens` use published cached-input or context-caching rates when the selected model has a verified read price.")
 		if hasCacheWriteTokens {
-			fmt.Println("- `Cache Write Tokens` are shown separately. If a model lacks a verified write price, its API estimate becomes a lower bound.")
+			fmt.Println("- `Cache Write Tokens` are shown separately. If a model lacks a verified write or storage price, its API estimate becomes a lower bound.")
 		} else {
 			fmt.Println("- `Cache Write Tokens` are currently zero in the selected local history, so write pricing did not affect this estimate.")
 		}
-		fmt.Println("- OpenAI estimates use the standard short-context tier. Long-context, regional, fast-mode, batch, and tool-call surcharges are not modeled.")
+		fmt.Println("- OpenAI and Gemini estimates use standard short-context tiers. Long-context, regional, fast-mode, batch, and tool-call surcharges are not modeled.")
 		fmt.Println("- Active session tails without `session.shutdown` can contribute request counts, but not token-based API cost estimates.")
 		if len(modelsWithoutAPIPricing) > 0 {
 			fmt.Printf("- Models without hardcoded API pricing: %s\n", strings.Join(modelsWithoutAPIPricing, ", "))

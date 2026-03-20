@@ -6,11 +6,12 @@ import (
 
 func TestEstimateAPICost(t *testing.T) {
 	tests := []struct {
-		name     string
-		model    string
-		stat     *ModelStat
-		wantUSD  float64
-		wantNil  bool
+		name             string
+		model            string
+		stat             *ModelStat
+		wantUSD          float64
+		wantNil          bool
+		wantCatalogModel string
 	}{
 		{
 			name:  "GPT-5.4 Basic",
@@ -40,6 +41,48 @@ func TestEstimateAPICost(t *testing.T) {
 			wantNil: true,
 		},
 		{
+			name:  "Gemini 3 Pro Preview",
+			model: "gemini-3-pro-preview",
+			stat: &ModelStat{
+				Input:     1_000_000, // $2.00
+				CacheRead: 1_000_000, // $0.20
+				Output:    1_000_000, // $12.00
+			},
+			wantUSD:          14.20,
+			wantCatalogModel: "gemini-3-pro-preview",
+		},
+		{
+			name:  "Gemini 3 Pro Alias Without Preview",
+			model: "gemini-3-pro",
+			stat: &ModelStat{
+				Input:  1_000_000, // $2.00
+				Output: 1_000_000, // $12.00
+			},
+			wantUSD:          14.00,
+			wantCatalogModel: "gemini-3-pro-preview",
+		},
+		{
+			name:  "GPT-5 mini",
+			model: "gpt-5-mini",
+			stat: &ModelStat{
+				Input:  1_000_000, // $0.25
+				Output: 1_000_000, // $2.00
+			},
+			wantUSD:          2.25,
+			wantCatalogModel: "gpt-5-mini",
+		},
+		{
+			name:  "GPT-4.1 Current Pricing",
+			model: "gpt-4.1",
+			stat: &ModelStat{
+				Input:     1_000_000, // $2.00
+				CacheRead: 1_000_000, // $0.50
+				Output:    1_000_000, // $8.00
+			},
+			wantUSD:          10.50,
+			wantCatalogModel: "gpt-4.1",
+		},
+		{
 			name:  "Empty Stat",
 			model: "gpt-5.4",
 			stat:  &ModelStat{},
@@ -63,6 +106,9 @@ func TestEstimateAPICost(t *testing.T) {
 			// Check total cost with small epsilon for float comparison
 			if abs(got.TotalUSD-tt.wantUSD) > 1e-9 {
 				t.Errorf("EstimateAPICost().TotalUSD = %v, want %v", got.TotalUSD, tt.wantUSD)
+			}
+			if tt.wantCatalogModel != "" && got.PriceCatalogModel != tt.wantCatalogModel {
+				t.Errorf("EstimateAPICost().PriceCatalogModel = %q, want %q", got.PriceCatalogModel, tt.wantCatalogModel)
 			}
 		})
 	}

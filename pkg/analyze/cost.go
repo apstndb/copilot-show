@@ -4,7 +4,7 @@ import (
 	"strings"
 )
 
-const PricingCatalogVersion = "public-token-pricing-2026-03"
+const PricingCatalogVersion = "public-token-pricing-2026-03-20-google-audit"
 
 type ModelStat struct {
 	Requests                int64            `json:"requests" yaml:"requests"`
@@ -84,6 +84,13 @@ var apiPricingCatalog = map[string]priceCatalogEntry{
 		OutputUSDPerMTok:    25.00,
 		Source:              "https://platform.claude.com/docs/en/about-claude/pricing",
 	},
+	NormalizeModelKey("gemini-3-pro-preview"): {
+		ModelID:             "gemini-3-pro-preview",
+		InputUSDPerMTok:     2.00,
+		CacheReadUSDPerMTok: float64Ptr(0.20),
+		OutputUSDPerMTok:    12.00,
+		Source:              "https://blog.google/innovation-and-ai/technology/developers-tools/gemini-3-developers/",
+	},
 	NormalizeModelKey("gpt-5.4"): {
 		ModelID:             "gpt-5.4",
 		InputUSDPerMTok:     2.50,
@@ -112,6 +119,13 @@ var apiPricingCatalog = map[string]priceCatalogEntry{
 		OutputUSDPerMTok:    14.00,
 		Source:              "https://developers.openai.com/api/docs/pricing",
 	},
+	NormalizeModelKey("gpt-5.2"): {
+		ModelID:             "gpt-5.2",
+		InputUSDPerMTok:     1.75,
+		CacheReadUSDPerMTok: float64Ptr(0.175),
+		OutputUSDPerMTok:    14.00,
+		Source:              "https://developers.openai.com/api/docs/models/gpt-5.2",
+	},
 	NormalizeModelKey("gpt-5.1-codex-max"): {
 		ModelID:             "gpt-5.1-codex-max",
 		InputUSDPerMTok:     1.25,
@@ -126,6 +140,13 @@ var apiPricingCatalog = map[string]priceCatalogEntry{
 		OutputUSDPerMTok:    10.00,
 		Source:              "https://developers.openai.com/api/docs/pricing",
 	},
+	NormalizeModelKey("gpt-5.1"): {
+		ModelID:             "gpt-5.1",
+		InputUSDPerMTok:     1.25,
+		CacheReadUSDPerMTok: float64Ptr(0.125),
+		OutputUSDPerMTok:    10.00,
+		Source:              "https://developers.openai.com/api/docs/models/gpt-5.1",
+	},
 	NormalizeModelKey("gpt-5.1-codex-mini"): {
 		ModelID:             "gpt-5.1-codex-mini",
 		InputUSDPerMTok:     0.25,
@@ -133,12 +154,19 @@ var apiPricingCatalog = map[string]priceCatalogEntry{
 		OutputUSDPerMTok:    2.00,
 		Source:              "https://developers.openai.com/api/docs/pricing",
 	},
+	NormalizeModelKey("gpt-5-mini"): {
+		ModelID:             "gpt-5-mini",
+		InputUSDPerMTok:     0.25,
+		CacheReadUSDPerMTok: float64Ptr(0.025),
+		OutputUSDPerMTok:    2.00,
+		Source:              "https://developers.openai.com/api/docs/models/gpt-5-mini",
+	},
 	NormalizeModelKey("gpt-4.1"): {
 		ModelID:             "gpt-4.1",
-		InputUSDPerMTok:     3.00,
-		CacheReadUSDPerMTok: float64Ptr(0.75),
-		OutputUSDPerMTok:    12.00,
-		Source:              "https://developers.openai.com/api/docs/pricing",
+		InputUSDPerMTok:     2.00,
+		CacheReadUSDPerMTok: float64Ptr(0.50),
+		OutputUSDPerMTok:    8.00,
+		Source:              "https://developers.openai.com/api/docs/models/gpt-4.1",
 	},
 }
 
