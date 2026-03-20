@@ -53,3 +53,7 @@ Use DuckDB to reconstruct `assistant.turn_start` / `assistant.turn_end` windows 
 ## Prompt 13
 
 Use DuckDB with the `duckpgq` community extension to turn one Copilot `events.jsonl` file into a property graph with `Event`, `Interaction`, and `ToolCall` vertices, then explain which relationships are worth modeling as graph edges and which missing links must remain a relational caveat.
+
+## Prompt 14
+
+Use DuckDB to reconstruct billable `user.message` windows for a closed Copilot session, identify which windows are likely non-billable because they produced no `assistant.message`, and reconcile the weighted total to `session.shutdown.data.totalPremiumRequests`.

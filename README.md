@@ -26,7 +26,7 @@ Available subcommands:
 - `models`: Show available models and their multipliers.
 - `tools`: Show available tools.
 - `usage`: Show billing usage report from GitHub API, with model multipliers and entitlement joined from the models list and quota snapshots.
-- `stats`: Show local usage statistics aggregated from session history.
+- `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
 - `turns`: Show turn-by-turn usage statistics for a session.
 - `sessions`: List recent Copilot CLI sessions.
 - `history`: Show event history for a session.
@@ -110,9 +110,15 @@ copilot-show usage -m 0 --last 3
 
 Aggregates usage statistics from local session history (`~/.copilot/session-state/*/events.jsonl`).
 Useful for understanding which models are consuming your quota.
+The `Premium Requests (Cost)` column preserves fractional multipliers such as `0.33`.
+Use `--api-costs` to estimate equivalent API cost from shutdown token usage, including cached token reads when the selected model has a verified cached-input price.
+Model availability is still plan-dependent, so local shutdown metrics can contain model IDs that are not currently visible in `copilot-show models`.
 
 ```bash
 copilot-show stats [-a]
+
+# Compare premium-request overage vs. API-equivalent token cost
+copilot-show stats --api-costs
 ```
 
 ### Turns

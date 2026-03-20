@@ -12,6 +12,7 @@ This skill is especially useful for:
 - Finding how event `type` relates to `id`, `parentId`, and IDs stored inside sparse JSON payloads
 - Summarizing schema, per-file distributions, and cross-file relationships
 - Expanding arrays such as tool request lists and joining them to later execution events
+- Reconstructing billable user-message windows and weighted premium-request totals from closed session logs
 
 ## Core workflow
 
@@ -102,6 +103,7 @@ For event-log work, produce these views unless the user asks for something narro
 8. deep nested path discovery with `json_tree(...)` when payloads are large or heavily nested
 9. control-event inspection for `skill.invoked`, `subagent.started`, `subagent.completed`, and `system.notification` in newer Copilot CLI logs
 10. when needed, enrich the event-log view with `workspace.yaml`, `session.db`, and `glob()` counts to reconstruct more of the session overview
+11. when billing is relevant, closed-segment user-window summaries that compare raw `user.message`, `assistant.message`, and shutdown premium totals
 
 ## Interpretation guidance
 
@@ -118,12 +120,13 @@ For event-log work, produce these views unless the user asks for something narro
 - When counts are changing because the current session is active, mention the observation window and that the dataset is live.
 - If you are explaining `history`-style output, note that `tool.execution_complete` may not include `toolName`, so blank tool names are expected unless you join back to `tool.execution_start` on `toolCallId`.
 - For `duckpgq`, keep unresolved `parentId` / `parentToolCallId` links in relational side tables and only build graph edges for rows whose referenced vertices actually exist. In current DuckDB builds, it is also safer to cast UUID-like JSONL IDs to `VARCHAR`, and every edge pattern in `MATCH` must bind to a variable.
+- For closed sessions, `session.shutdown.data.modelMetrics.*.requests.count` is often closer to assistant-message volume than to premium billing. `requests.cost` and `totalPremiumRequests` are better modeled as weighted billable user-message windows, and windows with no `assistant.message` before the next user boundary are strong non-billable candidates.
 
 ## Output expectations
 
 - Prefer concise tables or CSV snippets from DuckDB for raw facts.
 - Then summarize the important structural findings in plain language.
-- If you discover a reusable pattern, add it to `queries.md` so the skill improves over time.
+- If you discover a reusable pattern, add the SQL to a file in `queries/` and a row to the index in `queries.md`.
 
 ## CLI usage tips
 
@@ -132,4 +135,4 @@ For event-log work, produce these views unless the user asks for something narro
 - Use `.once` or `.output` when a result set is large enough that copying from the terminal would be clumsy.
 - Use `-readonly` when opening an existing DuckDB database file only for inspection. For pure JSON or JSONL analysis, `duckdb :memory:` remains a good default.
 
-See also: [queries.md](queries.md)
+See also: [queries.md](queries.md) (index) · [`queries/`](queries/) (individual SQL files)

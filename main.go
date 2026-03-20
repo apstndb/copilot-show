@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -31,6 +33,8 @@ const (
 	version      = "0.1.5"
 	uiVersionOld = "old"
 	uiVersionNew = "new"
+
+	apiPricingCatalogVersion = "public-token-pricing-2026-03"
 
 	historyViewRaw   = "raw"
 	historyViewSpans = "spans"
@@ -174,6 +178,201 @@ func createTable(header []string, rightAlignedCols []int, hierarchicalMerge bool
 	}
 	table.Header(anyHeader...)
 	return table
+}
+
+type statsModelStat struct {
+	Requests                int64            `json:"requests" yaml:"requests"`
+	Cost                    float64          `json:"cost" yaml:"cost"`
+	Input                   int64            `json:"inputTokens" yaml:"inputTokens"`
+	CacheRead               int64            `json:"cacheReadTokens,omitempty" yaml:"cacheReadTokens,omitempty"`
+	CacheWrite              int64            `json:"cacheWriteTokens,omitempty" yaml:"cacheWriteTokens,omitempty"`
+	Output                  int64            `json:"outputTokens" yaml:"outputTokens"`
+	EstimatedOverageCostUSD float64          `json:"estimatedOverageCostUsd,omitempty" yaml:"estimatedOverageCostUsd,omitempty"`
+	EstimatedAPICost        *apiCostEstimate `json:"estimatedApiCost,omitempty" yaml:"estimatedApiCost,omitempty"`
+}
+
+type apiPriceCatalogEntry struct {
+	ModelID              string   `json:"modelId" yaml:"modelId"`
+	InputUSDPerMTok      float64  `json:"inputUsdPerMToken" yaml:"inputUsdPerMToken"`
+	CacheReadUSDPerMTok  *float64 `json:"cacheReadUsdPerMToken,omitempty" yaml:"cacheReadUsdPerMToken,omitempty"`
+	CacheWriteUSDPerMTok *float64 `json:"cacheWriteUsdPerMToken,omitempty" yaml:"cacheWriteUsdPerMToken,omitempty"`
+	OutputUSDPerMTok     float64  `json:"outputUsdPerMToken" yaml:"outputUsdPerMToken"`
+	Source               string   `json:"source" yaml:"source"`
+}
+
+type apiCostEstimate struct {
+	InputUSD               float64  `json:"inputUsd" yaml:"inputUsd"`
+	CacheReadUSD           float64  `json:"cacheReadUsd,omitempty" yaml:"cacheReadUsd,omitempty"`
+	CacheWriteUSD          float64  `json:"cacheWriteUsd,omitempty" yaml:"cacheWriteUsd,omitempty"`
+	OutputUSD              float64  `json:"outputUsd" yaml:"outputUsd"`
+	TotalUSD               float64  `json:"totalUsd" yaml:"totalUsd"`
+	IsComplete             bool     `json:"isComplete" yaml:"isComplete"`
+	MissingPriceComponents []string `json:"missingPriceComponents,omitempty" yaml:"missingPriceComponents,omitempty"`
+	PriceCatalogModel      string   `json:"priceCatalogModel" yaml:"priceCatalogModel"`
+	Source                 string   `json:"source" yaml:"source"`
+}
+
+// Public API token prices for the optional `stats --api-costs` estimate.
+// This is separate from Copilot premium-request multipliers, which are plan-dependent
+// and should come from local shutdown metrics, live model metadata, or GitHub Docs.
+var apiPricingCatalog = map[string]apiPriceCatalogEntry{
+	normalizeModelKey("claude-haiku-4.5"): {
+		ModelID:             "claude-haiku-4.5",
+		InputUSDPerMTok:     1.00,
+		CacheReadUSDPerMTok: float64Ptr(0.10),
+		OutputUSDPerMTok:    5.00,
+		Source:              "https://platform.claude.com/docs/en/about-claude/pricing",
+	},
+	normalizeModelKey("claude-sonnet-4"): {
+		ModelID:             "claude-sonnet-4",
+		InputUSDPerMTok:     3.00,
+		CacheReadUSDPerMTok: float64Ptr(0.30),
+		OutputUSDPerMTok:    15.00,
+		Source:              "https://platform.claude.com/docs/en/about-claude/pricing",
+	},
+	normalizeModelKey("claude-sonnet-4.5"): {
+		ModelID:             "claude-sonnet-4.5",
+		InputUSDPerMTok:     3.00,
+		CacheReadUSDPerMTok: float64Ptr(0.30),
+		OutputUSDPerMTok:    15.00,
+		Source:              "https://platform.claude.com/docs/en/about-claude/pricing",
+	},
+	normalizeModelKey("claude-sonnet-4.6"): {
+		ModelID:             "claude-sonnet-4.6",
+		InputUSDPerMTok:     3.00,
+		CacheReadUSDPerMTok: float64Ptr(0.30),
+		OutputUSDPerMTok:    15.00,
+		Source:              "https://platform.claude.com/docs/en/about-claude/pricing",
+	},
+	normalizeModelKey("claude-opus-4.5"): {
+		ModelID:             "claude-opus-4.5",
+		InputUSDPerMTok:     5.00,
+		CacheReadUSDPerMTok: float64Ptr(0.50),
+		OutputUSDPerMTok:    25.00,
+		Source:              "https://platform.claude.com/docs/en/about-claude/pricing",
+	},
+	normalizeModelKey("claude-opus-4.6"): {
+		ModelID:             "claude-opus-4.6",
+		InputUSDPerMTok:     5.00,
+		CacheReadUSDPerMTok: float64Ptr(0.50),
+		OutputUSDPerMTok:    25.00,
+		Source:              "https://platform.claude.com/docs/en/about-claude/pricing",
+	},
+	normalizeModelKey("gpt-5.4"): {
+		ModelID:             "gpt-5.4",
+		InputUSDPerMTok:     2.50,
+		CacheReadUSDPerMTok: float64Ptr(0.25),
+		OutputUSDPerMTok:    15.00,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+	normalizeModelKey("gpt-5.4-mini"): {
+		ModelID:             "gpt-5.4-mini",
+		InputUSDPerMTok:     0.75,
+		CacheReadUSDPerMTok: float64Ptr(0.075),
+		OutputUSDPerMTok:    4.50,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+	normalizeModelKey("gpt-5.3-codex"): {
+		ModelID:             "gpt-5.3-codex",
+		InputUSDPerMTok:     1.75,
+		CacheReadUSDPerMTok: float64Ptr(0.175),
+		OutputUSDPerMTok:    14.00,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+	normalizeModelKey("gpt-5.2-codex"): {
+		ModelID:             "gpt-5.2-codex",
+		InputUSDPerMTok:     1.75,
+		CacheReadUSDPerMTok: float64Ptr(0.175),
+		OutputUSDPerMTok:    14.00,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+	normalizeModelKey("gpt-5.1-codex-max"): {
+		ModelID:             "gpt-5.1-codex-max",
+		InputUSDPerMTok:     1.25,
+		CacheReadUSDPerMTok: float64Ptr(0.125),
+		OutputUSDPerMTok:    10.00,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+	normalizeModelKey("gpt-5.1-codex"): {
+		ModelID:             "gpt-5.1-codex",
+		InputUSDPerMTok:     1.25,
+		CacheReadUSDPerMTok: float64Ptr(0.125),
+		OutputUSDPerMTok:    10.00,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+	normalizeModelKey("gpt-5.1-codex-mini"): {
+		ModelID:             "gpt-5.1-codex-mini",
+		InputUSDPerMTok:     0.25,
+		CacheReadUSDPerMTok: float64Ptr(0.025),
+		OutputUSDPerMTok:    2.00,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+	normalizeModelKey("gpt-4.1"): {
+		ModelID:             "gpt-4.1",
+		InputUSDPerMTok:     3.00,
+		CacheReadUSDPerMTok: float64Ptr(0.75),
+		OutputUSDPerMTok:    12.00,
+		Source:              "https://developers.openai.com/api/docs/pricing",
+	},
+}
+
+func float64Ptr(v float64) *float64 {
+	return &v
+}
+
+func normalizeModelKey(s string) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(s), " ", ""), "-", "")
+	return strings.TrimSuffix(s, "preview")
+}
+
+func formatFloatCompact(v float64) string {
+	if math.Abs(v-math.Round(v)) < 1e-9 {
+		return strconv.FormatFloat(v, 'f', 0, 64)
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+func formatUSD(v float64) string {
+	return fmt.Sprintf("$%.2f", v)
+}
+
+func estimateAPICost(model string, stat *statsModelStat) *apiCostEstimate {
+	if stat.Input == 0 && stat.CacheRead == 0 && stat.CacheWrite == 0 && stat.Output == 0 {
+		return nil
+	}
+	price, ok := apiPricingCatalog[normalizeModelKey(model)]
+	if !ok {
+		return nil
+	}
+	estimate := &apiCostEstimate{
+		InputUSD:          float64(stat.Input) / 1_000_000 * price.InputUSDPerMTok,
+		OutputUSD:         float64(stat.Output) / 1_000_000 * price.OutputUSDPerMTok,
+		IsComplete:        true,
+		PriceCatalogModel: price.ModelID,
+		Source:            price.Source,
+	}
+	estimate.TotalUSD = estimate.InputUSD + estimate.OutputUSD
+
+	if stat.CacheRead > 0 {
+		if price.CacheReadUSDPerMTok != nil {
+			estimate.CacheReadUSD = float64(stat.CacheRead) / 1_000_000 * *price.CacheReadUSDPerMTok
+			estimate.TotalUSD += estimate.CacheReadUSD
+		} else {
+			estimate.IsComplete = false
+			estimate.MissingPriceComponents = append(estimate.MissingPriceComponents, "cacheReadTokens")
+		}
+	}
+	if stat.CacheWrite > 0 {
+		if price.CacheWriteUSDPerMTok != nil {
+			estimate.CacheWriteUSD = float64(stat.CacheWrite) / 1_000_000 * *price.CacheWriteUSDPerMTok
+			estimate.TotalUSD += estimate.CacheWriteUSD
+		} else {
+			estimate.IsComplete = false
+			estimate.MissingPriceComponents = append(estimate.MissingPriceComponents, "cacheWriteTokens")
+		}
+	}
+
+	return estimate
 }
 
 func withSession(ctx context.Context, client *copilot.Client, fn func(session *copilot.Session) error) error {
@@ -1209,17 +1408,12 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 
 	// Fetch models to join with usage (Left Join Multiplier)
 	multiplierMap := make(map[string]float64)
-	normalize := func(s string) string {
-		s = strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(s), " ", ""), "-", "")
-		return strings.TrimSuffix(s, "preview")
-	}
-
 	modelsList, err := client.RPC.Models.List(ctx)
 	if err == nil {
 		for _, m := range modelsList.Models {
 			if m.Billing != nil {
-				multiplierMap[normalize(m.Name)] = m.Billing.Multiplier
-				multiplierMap[normalize(m.ID)] = m.Billing.Multiplier
+				multiplierMap[normalizeModelKey(m.Name)] = m.Billing.Multiplier
+				multiplierMap[normalizeModelKey(m.ID)] = m.Billing.Multiplier
 			}
 		}
 	}
@@ -1260,7 +1454,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		}
 		for _, item := range res.UsageItems {
 			multiplier := "-"
-			if m, ok := multiplierMap[normalize(item.Model)]; ok {
+			if m, ok := multiplierMap[normalizeModelKey(item.Model)]; ok {
 				multiplier = strconv.FormatFloat(m, 'f', -1, 64)
 				if m == 0 {
 					multiplier = "Included (0)"
@@ -1405,8 +1599,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	fmt.Println("- 'Amount (USD)' is the total billed cost in USD.")
 	fmt.Println("- 'req.' stands for 'requests'.")
 }
-
-const sessionEventScannerMaxTokenSize = 16 * 1024 * 1024
 
 type sessionEvent struct {
 	ID        string
@@ -1603,59 +1795,104 @@ func sessionEventsPath(sessionID string) string {
 	return filepath.Join(home, ".copilot", "session-state", sessionID, "events.jsonl")
 }
 
+var errStopJSONLIteration = errors.New("stop jsonl iteration")
+
+func visitJSONLObjects(path string, fn func(map[string]any) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("error opening events file: %w", err)
+	}
+	defer f.Close()
+
+	decoder := json.NewDecoder(bufio.NewReader(f))
+	rowNo := 0
+	for {
+		var ev map[string]any
+		if err := decoder.Decode(&ev); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return fmt.Errorf("error decoding %s row %d: %w", path, rowNo+1, err)
+		}
+		rowNo++
+		if err := fn(ev); err != nil {
+			if errors.Is(err, errStopJSONLIteration) {
+				return nil
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func sessionHasShutdown(eventsPath string) (bool, error) {
+	hasShutdown := false
+	err := visitJSONLObjects(eventsPath, func(ev map[string]any) error {
+		if ev["type"] == "session.shutdown" {
+			hasShutdown = true
+			return errStopJSONLIteration
+		}
+		return nil
+	})
+	return hasShutdown, err
+}
+
 func loadSessionRawEvents(sessionID string) ([]map[string]any, error) {
 	eventsPath := sessionEventsPath(sessionID)
 	if _, err := os.Stat(eventsPath); err != nil {
 		return nil, fmt.Errorf("no local events found for session %s", sessionID)
 	}
 
-	f, err := os.Open(eventsPath)
-	if err != nil {
-		return nil, fmt.Errorf("error opening events file: %w", err)
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024), sessionEventScannerMaxTokenSize)
-
 	var events []map[string]any
-	for scanner.Scan() {
-		var ev map[string]any
-		if err := json.Unmarshal(scanner.Bytes(), &ev); err == nil {
-			events = append(events, ev)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error scanning events file: %w", err)
+	if err := visitJSONLObjects(eventsPath, func(ev map[string]any) error {
+		events = append(events, ev)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	return events, nil
 }
 
-func parseSessionEvents(rawEvents []map[string]any) []*sessionEvent {
-	events := make([]*sessionEvent, 0, len(rawEvents))
-	for _, raw := range rawEvents {
-		timestampStr, _ := raw["timestamp"].(string)
-		ts, err := time.Parse(time.RFC3339, timestampStr)
-		if err != nil {
-			continue
-		}
-
-		data, _ := raw["data"].(map[string]any)
-		id, _ := raw["id"].(string)
-		parentID, _ := raw["parentId"].(string)
-		evType, _ := raw["type"].(string)
-
-		events = append(events, &sessionEvent{
-			ID:        id,
-			Type:      evType,
-			ParentID:  parentID,
-			Timestamp: ts,
-			Data:      data,
-		})
+func parseSessionEvent(raw map[string]any) *sessionEvent {
+	timestampStr, _ := raw["timestamp"].(string)
+	ts, err := time.Parse(time.RFC3339, timestampStr)
+	if err != nil {
+		return nil
 	}
-	return events
+
+	data, _ := raw["data"].(map[string]any)
+	id, _ := raw["id"].(string)
+	parentID, _ := raw["parentId"].(string)
+	evType, _ := raw["type"].(string)
+
+	return &sessionEvent{
+		ID:        id,
+		Type:      evType,
+		ParentID:  parentID,
+		Timestamp: ts,
+		Data:      data,
+	}
+}
+
+func loadSessionEvents(sessionID string) ([]*sessionEvent, error) {
+	eventsPath := sessionEventsPath(sessionID)
+	if _, err := os.Stat(eventsPath); err != nil {
+		return nil, fmt.Errorf("no local events found for session %s", sessionID)
+	}
+
+	var events []*sessionEvent
+	if err := visitJSONLObjects(eventsPath, func(raw map[string]any) error {
+		if ev := parseSessionEvent(raw); ev != nil {
+			events = append(events, ev)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return events, nil
 }
 
 func dataString(data map[string]any, key string) string {
@@ -1846,8 +2083,7 @@ func populateHistorySpanTurnFields(row *historySpanProjectionRow, turn *sessionT
 	}
 }
 
-func buildHistoryRows(rawEvents []map[string]any) ([]historyDisplayRow, error) {
-	events := parseSessionEvents(rawEvents)
+func buildHistoryRows(events []*sessionEvent) ([]historyDisplayRow, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("no parsable events found")
 	}
@@ -1883,8 +2119,7 @@ func buildHistoryRows(rawEvents []map[string]any) ([]historyDisplayRow, error) {
 	return rows, nil
 }
 
-func buildHistorySpanProjectionRows(rawEvents []map[string]any) ([]historySpanProjectionRow, error) {
-	events := parseSessionEvents(rawEvents)
+func buildHistorySpanProjectionRows(events []*sessionEvent) ([]historySpanProjectionRow, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("no parsable events found")
 	}
@@ -2557,8 +2792,7 @@ func sortSessionNestedToolParents(parents map[string]*nestedToolParentAccumulato
 	return items
 }
 
-func buildSessionGraphSummary(sessionID string, rawEvents []map[string]any) (*sessionGraphSummary, error) {
-	events := parseSessionEvents(rawEvents)
+func buildSessionGraphSummary(sessionID string, events []*sessionEvent) (*sessionGraphSummary, error) {
 	if len(events) == 0 {
 		return nil, fmt.Errorf("no parsable events found for session %s", sessionID)
 	}
@@ -2831,18 +3065,23 @@ func showHistoryOld(sessionID string, format string) {
 }
 
 func showHistoryNew(sessionID string, format string) {
-	rawEvents, err := loadSessionRawEvents(sessionID)
+	if format == "yaml" {
+		rawEvents, err := loadSessionRawEvents(sessionID)
+		if err != nil {
+			log.Printf("%v", err)
+			return
+		}
+		printYAML(rawEvents)
+		return
+	}
+
+	events, err := loadSessionEvents(sessionID)
 	if err != nil {
 		log.Printf("%v", err)
 		return
 	}
 
-	if format == "yaml" {
-		printYAML(rawEvents)
-		return
-	}
-
-	rows, err := buildHistoryRows(rawEvents)
+	rows, err := buildHistoryRows(events)
 	if err != nil {
 		log.Printf("No parsable events found for session %s", sessionID)
 		return
@@ -2908,13 +3147,13 @@ func historyTurnKey(row historySpanProjectionRow) string {
 }
 
 func showHistorySpans(sessionID string, format string, groupBy string) {
-	rawEvents, err := loadSessionRawEvents(sessionID)
+	events, err := loadSessionEvents(sessionID)
 	if err != nil {
 		log.Printf("%v", err)
 		return
 	}
 
-	rows, err := buildHistorySpanProjectionRows(rawEvents)
+	rows, err := buildHistorySpanProjectionRows(events)
 	if err != nil {
 		log.Printf("No parsable events found for session %s", sessionID)
 		return
@@ -2989,13 +3228,13 @@ func showGraph(ctx context.Context, client *copilot.Client, sessionID string, fo
 	_ = ctx
 	_ = client
 
-	rawEvents, err := loadSessionRawEvents(sessionID)
+	events, err := loadSessionEvents(sessionID)
 	if err != nil {
 		log.Printf("%v", err)
 		return
 	}
 
-	summary, err := buildSessionGraphSummary(sessionID, rawEvents)
+	summary, err := buildSessionGraphSummary(sessionID, events)
 	if err != nil {
 		log.Printf("%v", err)
 		return
@@ -3083,13 +3322,11 @@ func showGraph(ctx context.Context, client *copilot.Client, sessionID string, fo
 }
 
 func showTurnsV2(sessionID string, format string) {
-	rawEvents, err := loadSessionRawEvents(sessionID)
+	events, err := loadSessionEvents(sessionID)
 	if err != nil {
 		log.Printf("%v", err)
 		return
 	}
-
-	events := parseSessionEvents(rawEvents)
 	if len(events) == 0 {
 		log.Printf("No parsable events found for session %s", sessionID)
 		return
@@ -3160,30 +3397,26 @@ func showTurns(sessionID string, format string) {
 
 func newStatsCmd() *cobra.Command {
 	var showAllHistory bool
+	var showAPICosts bool
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Show aggregate usage statistics from local session history",
 		Run: func(cmd *cobra.Command, args []string) {
-			showStats(outputFormat, showAllHistory)
+			showStats(outputFormat, showAllHistory, showAPICosts)
 		},
 	}
 	cmd.Flags().BoolVarP(&showAllHistory, "all", "a", false, "Show statistics for all time (default: current month UTC)")
+	cmd.Flags().BoolVar(&showAPICosts, "api-costs", false, "Estimate equivalent API costs from token usage")
 	return cmd
 }
 
-func showStats(format string, showAllHistory bool) {
+func showStats(format string, showAllHistory bool, showAPICosts bool) {
 	home, _ := os.UserHomeDir()
 	stateDir := filepath.Join(home, ".copilot", "session-state")
 	entries, _ := os.ReadDir(stateDir)
 
-	type modelStat struct {
-		Requests int64 `json:"requests" yaml:"requests"`
-		Cost     int64 `json:"cost" yaml:"cost"`
-		Input    int64 `json:"inputTokens" yaml:"inputTokens"`
-		Output   int64 `json:"outputTokens" yaml:"outputTokens"`
-	}
-	stats := make(map[string]*modelStat)
-	var totalPremiumRequests int64
+	stats := make(map[string]*statsModelStat)
+	var totalPremiumRequests float64
 
 	now := time.Now().UTC()
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -3193,96 +3426,154 @@ func showStats(format string, showAllHistory bool) {
 			continue
 		}
 		eventsPath := filepath.Join(stateDir, entry.Name(), "events.jsonl")
-		f, err := os.Open(eventsPath)
-		if err != nil {
+		if _, err := os.Stat(eventsPath); err != nil {
 			continue
 		}
-
-		var sessionEvents []map[string]any
-		scanner := bufio.NewScanner(f)
-		hasShutdown := false
-		for scanner.Scan() {
-			var ev map[string]any
-			if err := json.Unmarshal(scanner.Bytes(), &ev); err == nil {
-				sessionEvents = append(sessionEvents, ev)
-				if ev["type"] == "session.shutdown" {
-					hasShutdown = true
-				}
-			}
+		hasShutdown, err := sessionHasShutdown(eventsPath)
+		if err != nil {
+			log.Printf("Error reading %s: %v", eventsPath, err)
+			continue
 		}
-		f.Close()
-
-		for _, ev := range sessionEvents {
+		if err := visitJSONLObjects(eventsPath, func(ev map[string]any) error {
 			if !showAllHistory {
 				timestampStr, _ := ev["timestamp"].(string)
 				ts, err := time.Parse(time.RFC3339, timestampStr)
 				if err == nil && ts.Before(startOfMonth) {
-					continue
+					return nil
 				}
 			}
 
 			data, _ := ev["data"].(map[string]any)
 			if data == nil {
-				continue
+				return nil
 			}
 
 			if ev["type"] == "session.shutdown" {
 				if total, ok := data["totalPremiumRequests"].(float64); ok {
-					totalPremiumRequests += int64(total)
+					totalPremiumRequests += total
 				}
 				if metrics, ok := data["modelMetrics"].(map[string]any); ok {
 					for model, m := range metrics {
 						if mv, ok := m.(map[string]any); ok {
 							if _, ok := stats[model]; !ok {
-								stats[model] = &modelStat{}
+								stats[model] = &statsModelStat{}
 							}
 							s := stats[model]
 							if reqs, ok := mv["requests"].(map[string]any); ok {
 								count, _ := reqs["count"].(float64)
 								cost, _ := reqs["cost"].(float64)
 								s.Requests += int64(count)
-								s.Cost += int64(cost)
+								s.Cost += cost
 							}
 							if usage, ok := mv["usage"].(map[string]any); ok {
 								in, _ := usage["inputTokens"].(float64)
+								cacheRead, _ := usage["cacheReadTokens"].(float64)
+								cacheWrite, _ := usage["cacheWriteTokens"].(float64)
 								out, _ := usage["outputTokens"].(float64)
 								s.Input += int64(in)
+								s.CacheRead += int64(cacheRead)
+								s.CacheWrite += int64(cacheWrite)
 								s.Output += int64(out)
 							}
 						}
 					}
 				}
 			} else if !hasShutdown && ev["type"] == "tool.execution_complete" {
-				// Ongoing session: estimate from individual tool completions
 				model, _ := data["model"].(string)
 				if model != "" {
 					if _, ok := stats[model]; !ok {
-						stats[model] = &modelStat{}
+						stats[model] = &statsModelStat{}
 					}
-					s := stats[model]
-					s.Requests++
-					// Since we don't know the exact cost logic here (it's server side),
-					// we just count it as 1 request.
-					// Note: This is an estimation for active sessions.
+					stats[model].Requests++
 				}
+			}
+			return nil
+		}); err != nil {
+			log.Printf("Error processing %s: %v", eventsPath, err)
+			continue
+		}
+	}
+
+	var totalEstimatedAPICostUSD float64
+	var pricedModels []string
+	var partiallyPricedModels []string
+	var modelsWithoutAPIPricing []string
+	var modelsWithoutTokenUsage []string
+	hasCacheReadTokens := false
+	hasCacheWriteTokens := false
+
+	var models []string
+	for m := range stats {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+
+	for _, model := range models {
+		s := stats[model]
+		s.EstimatedOverageCostUSD = s.Cost * 0.04
+		if s.CacheRead > 0 {
+			hasCacheReadTokens = true
+		}
+		if s.CacheWrite > 0 {
+			hasCacheWriteTokens = true
+		}
+		if !showAPICosts {
+			continue
+		}
+		switch {
+		case s.Input == 0 && s.CacheRead == 0 && s.CacheWrite == 0 && s.Output == 0:
+			modelsWithoutTokenUsage = append(modelsWithoutTokenUsage, model)
+		default:
+			s.EstimatedAPICost = estimateAPICost(model, s)
+			if s.EstimatedAPICost == nil {
+				modelsWithoutAPIPricing = append(modelsWithoutAPIPricing, model)
+				continue
+			}
+			totalEstimatedAPICostUSD += s.EstimatedAPICost.TotalUSD
+			if s.EstimatedAPICost.IsComplete {
+				pricedModels = append(pricedModels, model)
+			} else {
+				partiallyPricedModels = append(partiallyPricedModels, model)
 			}
 		}
 	}
 
 	if format == "yaml" {
-		printYAML(map[string]any{
-			"totalPremiumRequests": totalPremiumRequests,
-			"modelStats":           stats,
-			"isCurrentMonthOnly":   !showAllHistory,
-		})
+		payload := map[string]any{
+			"totalPremiumRequests":    totalPremiumRequests,
+			"estimatedOverageCostUsd": totalPremiumRequests * 0.04,
+			"modelStats":              stats,
+			"isCurrentMonthOnly":      !showAllHistory,
+		}
+		if showAPICosts {
+			payload["estimatedApiCostUsd"] = totalEstimatedAPICostUSD
+			payload["priceCatalogVersion"] = apiPricingCatalogVersion
+			payload["pricedModels"] = pricedModels
+			payload["partiallyPricedModels"] = partiallyPricedModels
+			payload["modelsWithoutApiPricing"] = modelsWithoutAPIPricing
+			payload["modelsWithoutTokenUsage"] = modelsWithoutTokenUsage
+			payload["apiPricingSources"] = []string{
+				"https://developers.openai.com/api/docs/pricing",
+				"https://platform.claude.com/docs/en/about-claude/pricing",
+			}
+			payload["apiPricingAssumptions"] = []string{
+				"Estimates use hardcoded public API prices keyed by model ID.",
+				"Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.",
+				"OpenAI pricing uses the standard short-context tier; long-context, regional, and batch adjustments are not modeled.",
+				"Anthropic cache reads use published cache-hit prices; cache writes are not priced because duration is not persisted in session logs.",
+				"Active session tails without session.shutdown contribute request counts but not token-based costs.",
+			}
+			payload["modelCatalogSource"] = "https://docs.github.com/en/copilot/reference/ai-models/supported-models#model-multipliers"
+		}
+		printYAML(payload)
 		return
 	}
 
-	title := "Total Premium Requests (Current Month UTC): %d\n\n"
+	title := "Total Premium Requests (Current Month UTC): %s\n\n"
 	if showAllHistory {
-		title = "Total Premium Requests (All Local History): %d\n\n"
+		title = "Total Premium Requests (All Local History): %s\n\n"
 	}
-	fmt.Printf(title, totalPremiumRequests)
+	fmt.Printf(title, formatFloatCompact(totalPremiumRequests))
 
 	if len(stats) == 0 {
 		fmt.Println("No detailed model statistics found for the selected period.")
@@ -3291,37 +3582,88 @@ func showStats(format string, showAllHistory bool) {
 
 	totalCostUSD := float64(totalPremiumRequests) * 0.04
 
-	header := []string{"Model", "Requests", "Premium Requests (Cost)", "Input Tokens", "Output Tokens", "Est. Overage Cost"}
-	table := createTable(header, []int{1, 2, 3, 4, 5}, false, false)
-
-	var models []string
-	for m := range stats {
-		models = append(models, m)
+	header := []string{"Model", "Requests", "Premium Requests (Cost)", "Input Tokens"}
+	if showAPICosts && hasCacheReadTokens {
+		header = append(header, "Cache Read Tokens")
 	}
-	sort.Strings(models)
+	if showAPICosts && hasCacheWriteTokens {
+		header = append(header, "Cache Write Tokens")
+	}
+	header = append(header, "Output Tokens", "Est. Overage Cost")
+	if showAPICosts {
+		header = append(header, "Est. API Cost")
+	}
+	var rightAlignedCols []int
+	for i := 1; i < len(header); i++ {
+		rightAlignedCols = append(rightAlignedCols, i)
+	}
+	table := createTable(header, rightAlignedCols, false, false)
 
 	for _, m := range models {
 		s := stats[m]
-		overageEst := fmt.Sprintf("$%.2f", float64(s.Cost)*0.04)
+		overageEst := formatUSD(s.EstimatedOverageCostUSD)
 		if s.Cost == 0 {
 			overageEst = "-"
 		}
-		table.Append([]string{
+		row := []string{
 			m,
 			strconv.FormatInt(s.Requests, 10),
-			strconv.FormatInt(s.Cost, 10),
+			formatFloatCompact(s.Cost),
 			strconv.FormatInt(s.Input, 10),
-			strconv.FormatInt(s.Output, 10),
-			overageEst,
-		})
+		}
+		if showAPICosts && hasCacheReadTokens {
+			row = append(row, strconv.FormatInt(s.CacheRead, 10))
+		}
+		if showAPICosts && hasCacheWriteTokens {
+			row = append(row, strconv.FormatInt(s.CacheWrite, 10))
+		}
+		row = append(row, strconv.FormatInt(s.Output, 10), overageEst)
+		if showAPICosts {
+			apiCost := "-"
+			if s.EstimatedAPICost != nil {
+				apiCost = formatUSD(s.EstimatedAPICost.TotalUSD)
+				if !s.EstimatedAPICost.IsComplete {
+					apiCost = ">= " + apiCost
+				}
+			}
+			row = append(row, apiCost)
+		}
+		table.Append(row)
 	}
 	table.Render()
 	if !showAllHistory {
-		fmt.Printf("\nEstimated Total Overage Cost (if quota is exhausted): $%.2f USD\n", totalCostUSD)
+		fmt.Printf("\nEstimated Total Overage Cost (if quota is exhausted): %s USD\n", formatUSD(totalCostUSD))
 	} else {
-		fmt.Printf("\nEstimated Total Overage Cost (across all history): $%.2f USD\n", totalCostUSD)
+		fmt.Printf("\nEstimated Total Overage Cost (across all history): %s USD\n", formatUSD(totalCostUSD))
 	}
-	fmt.Println("Note: Cost estimation is based on $0.04 USD per premium request for overage usage.")
+	if showAPICosts {
+		label := "Estimated Total API Cost (priced closed segments): %s USD\n"
+		if len(partiallyPricedModels) > 0 || len(modelsWithoutAPIPricing) > 0 {
+			label = "Estimated Total API Cost (lower bound from priced closed segments): %s USD\n"
+		}
+		fmt.Printf(label, formatUSD(totalEstimatedAPICostUSD))
+	}
+	fmt.Println("Notes:")
+	fmt.Println("- Overage cost uses $0.04 USD per premium request.")
+	fmt.Println("- `Premium Requests (Cost)` can be fractional because model multipliers are preserved from session shutdown metrics.")
+	if showAPICosts {
+		fmt.Println("- API cost uses hardcoded public token prices from OpenAI and Anthropic docs.")
+		fmt.Println("- Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.")
+		fmt.Println("- `Cache Read Tokens` are billed at cache-hit prices when the selected model has a verified cached-input rate.")
+		if hasCacheWriteTokens {
+			fmt.Println("- `Cache Write Tokens` are shown separately. If a model lacks a verified write price, its API estimate becomes a lower bound.")
+		} else {
+			fmt.Println("- `Cache Write Tokens` are currently zero in the selected local history, so write pricing did not affect this estimate.")
+		}
+		fmt.Println("- OpenAI estimates use the standard short-context tier. Long-context, regional, fast-mode, batch, and tool-call surcharges are not modeled.")
+		fmt.Println("- Active session tails without `session.shutdown` can contribute request counts, but not token-based API cost estimates.")
+		if len(modelsWithoutAPIPricing) > 0 {
+			fmt.Printf("- Models without hardcoded API pricing: %s\n", strings.Join(modelsWithoutAPIPricing, ", "))
+		}
+		if len(modelsWithoutTokenUsage) > 0 {
+			fmt.Printf("- Models with request counts but no shutdown token usage yet: %s\n", strings.Join(modelsWithoutTokenUsage, ", "))
+		}
+	}
 }
 
 func getTerminalWidth() int {
