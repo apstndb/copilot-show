@@ -89,6 +89,10 @@ func main() {
 
 	hiddenCmds := []*cobra.Command{
 		newAgentsCmd(client),
+		newSkillsCmd(client),
+		newExtensionsCmd(client),
+		newPluginsCmd(client),
+		newMcpCmd(client),
 		newCurrentModelCmd(client),
 		newCurrentAgentCmd(client),
 		newModeCmd(client),
@@ -447,6 +451,197 @@ func showAgents(ctx context.Context, client *copilot.Client, format string) {
 	})
 	if err != nil {
 		log.Printf("Error in agents command: %v", err)
+	}
+}
+
+func newSkillsCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "skills",
+		Short: "List available skills",
+		Run: func(cmd *cobra.Command, args []string) {
+			showSkills(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+func showSkills(ctx context.Context, client *copilot.Client, format string) {
+	err := withSession(ctx, client, func(session *copilot.Session) error {
+		res, err := session.RPC.Skills.List(ctx)
+		if err != nil {
+			return err
+		}
+
+		if format == "yaml" {
+			printYAML(res)
+			return nil
+		}
+
+		header := []string{"Name", "Enabled", "Source", "Invocable", "Path", "Description"}
+		table := render.CreateTable(header, nil, false, false, tableMode)
+
+		for _, s := range res.Skills {
+			path := ""
+			if s.Path != nil {
+				path = *s.Path
+			}
+			desc := strings.SplitN(s.Description, "\n", 2)[0]
+			if len(desc) > 80 {
+				desc = desc[:77] + "..."
+			}
+			table.Append([]string{
+				s.Name,
+				fmt.Sprintf("%v", s.Enabled),
+				s.Source,
+				fmt.Sprintf("%v", s.UserInvocable),
+				path,
+				desc,
+			})
+		}
+		table.Render()
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error in skills command: %v", err)
+	}
+}
+
+func newExtensionsCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "extensions",
+		Short: "List available extensions",
+		Run: func(cmd *cobra.Command, args []string) {
+			showExtensions(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+func showExtensions(ctx context.Context, client *copilot.Client, format string) {
+	err := withSession(ctx, client, func(session *copilot.Session) error {
+		res, err := session.RPC.Extensions.List(ctx)
+		if err != nil {
+			return err
+		}
+
+		if format == "yaml" {
+			printYAML(res)
+			return nil
+		}
+
+		header := []string{"ID", "Name", "Status", "Source", "PID"}
+		table := render.CreateTable(header, nil, false, false, tableMode)
+
+		for _, e := range res.Extensions {
+			pid := ""
+			if e.PID != nil {
+				pid = strconv.FormatInt(*e.PID, 10)
+			}
+			table.Append([]string{
+				e.ID,
+				e.Name,
+				string(e.Status),
+				string(e.Source),
+				pid,
+			})
+		}
+		table.Render()
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error in extensions command: %v", err)
+	}
+}
+
+func newPluginsCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "plugins",
+		Short: "List installed plugins",
+		Run: func(cmd *cobra.Command, args []string) {
+			showPlugins(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+func showPlugins(ctx context.Context, client *copilot.Client, format string) {
+	err := withSession(ctx, client, func(session *copilot.Session) error {
+		res, err := session.RPC.Plugins.List(ctx)
+		if err != nil {
+			return err
+		}
+
+		if format == "yaml" {
+			printYAML(res)
+			return nil
+		}
+
+		header := []string{"Name", "Enabled", "Marketplace", "Version"}
+		table := render.CreateTable(header, nil, false, false, tableMode)
+
+		for _, p := range res.Plugins {
+			version := ""
+			if p.Version != nil {
+				version = *p.Version
+			}
+			table.Append([]string{
+				p.Name,
+				fmt.Sprintf("%v", p.Enabled),
+				p.Marketplace,
+				version,
+			})
+		}
+		table.Render()
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error in plugins command: %v", err)
+	}
+}
+
+func newMcpCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "mcp",
+		Short: "List MCP servers",
+		Run: func(cmd *cobra.Command, args []string) {
+			showMcp(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+func showMcp(ctx context.Context, client *copilot.Client, format string) {
+	err := withSession(ctx, client, func(session *copilot.Session) error {
+		res, err := session.RPC.Mcp.List(ctx)
+		if err != nil {
+			return err
+		}
+
+		if format == "yaml" {
+			printYAML(res)
+			return nil
+		}
+
+		header := []string{"Name", "Status", "Source", "Error"}
+		table := render.CreateTable(header, nil, false, false, tableMode)
+
+		for _, s := range res.Servers {
+			source := ""
+			if s.Source != nil {
+				source = *s.Source
+			}
+			errMsg := ""
+			if s.Error != nil {
+				errMsg = *s.Error
+			}
+			table.Append([]string{
+				s.Name,
+				string(s.Status),
+				source,
+				errMsg,
+			})
+		}
+		table.Render()
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error in mcp command: %v", err)
 	}
 }
 

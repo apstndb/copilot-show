@@ -3,7 +3,7 @@ module github.com/apstndb/copilot-show
 go 1.26.1
 
 require (
-	github.com/github/copilot-sdk/go v0.1.33-0.20260311135713-ab8cc5a8cdf4
+	github.com/github/copilot-sdk/go v0.2.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/maruel/natural v1.3.0
 	github.com/olekukonko/tablewriter v1.1.3
@@ -16,6 +16,8 @@ require (
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect
 	github.com/fatih/color v1.18.0 // indirect
+	github.com/go-logr/logr v1.4.3 // indirect
+	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
@@ -26,5 +28,9 @@ require (
 	github.com/olekukonko/errors v1.1.0 // indirect
 	github.com/olekukonko/ll v0.1.4-0.20260115111900-9e59c2286df0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
+	go.opentelemetry.io/otel v1.35.0 // indirect
+	go.opentelemetry.io/otel/metric v1.35.0 // indirect
+	go.opentelemetry.io/otel/trace v1.35.0 // indirect
 	golang.org/x/sys v0.29.0 // indirect
 )
