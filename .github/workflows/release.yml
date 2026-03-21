@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify source tree
+        run: |
+          go test ./...
+          go vet ./...
+
+      - name: Build release assets
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+
+          targets=(
+            "darwin amd64 tar.gz"
+            "darwin arm64 tar.gz"
+            "linux amd64 tar.gz"
+            "linux arm64 tar.gz"
+            "windows amd64 zip"
+          )
+
+          for target in "${targets[@]}"; do
+            read -r goos goarch archive <<<"$target"
+
+            binary_name="copilot-show"
+            if [[ "$goos" == "windows" ]]; then
+              binary_name="${binary_name}.exe"
+            fi
+
+            package_dir="copilot-show_${VERSION}_${goos}_${goarch}"
+            output_dir="dist/${package_dir}"
+            mkdir -p "$output_dir"
+
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "${output_dir}/${binary_name}" .
+
+            cp README.md LICENSE "${output_dir}/"
+
+            if [[ "$archive" == "zip" ]]; then
+              (
+                cd dist
+                zip -qr "${package_dir}.zip" "${package_dir}"
+              )
+            else
+              tar -C dist -czf "dist/${package_dir}.tar.gz" "${package_dir}"
+            fi
+
+            rm -rf "${output_dir}"
+          done
+
+          (
+            cd dist
+            sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          )
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
