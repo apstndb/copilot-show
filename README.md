@@ -110,14 +110,35 @@ Aggregates usage statistics from local session history (`~/.copilot/session-stat
 Useful for understanding which models are consuming your quota.
 The `Premium Requests (Cost)` column preserves fractional multipliers such as `0.33`.
 Use `--api-costs` to estimate equivalent API cost from shutdown token usage, including cached token reads when the selected model has a verified cached-input price.
-Models without hardcoded API pricing still remain in the output; their API-cost cells stay empty and the printed total becomes a lower bound.
+Models without matching API pricing still remain in the output; their API-cost cells stay empty and the printed total becomes a lower bound.
 Model availability is still plan-dependent, so local shutdown metrics can contain model IDs that are not currently visible in `copilot-show models`.
+Use `--api-pricing <file>` to overlay those built-in public prices with local YAML values. This is intended as a safe starting point for local effective-price overrides, without baking private contract terms into the tool.
+Omitted fields inherit the built-in catalog. If you add a model that is not in the built-in catalog, define at least `inputUsdPerMToken` and `outputUsdPerMToken`.
+Use `--api-pricing-template` to dump a commented starter file with every built-in model and known value.
 
 ```bash
 copilot-show stats [-a]
 
 # Compare premium-request overage vs. API-equivalent token cost
 copilot-show stats --api-costs
+
+# Write a commented starter file you can edit locally
+copilot-show stats --api-pricing-template > ~/.copilot/api-pricing.yaml
+
+# Apply local API price overrides (implies --api-costs)
+copilot-show stats --api-pricing ~/.copilot/api-pricing.yaml
+```
+
+Example override file:
+
+```yaml
+models:
+  gpt-5.4:
+    inputUsdPerMToken: 1.50
+    outputUsdPerMToken: 12.00
+  claude-opus-4.6:
+    inputUsdPerMToken: 4.00
+    outputUsdPerMToken: 20.00
 ```
 
 ### Turns

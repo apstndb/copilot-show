@@ -3487,25 +3487,47 @@ func showTurns(sessionID string, format string) {
 func newStatsCmd() *cobra.Command {
 	var showAllHistory bool
 	var showAPICosts bool
+	var apiPricingOverridePath string
+	var showAPIPricingTemplate bool
 	cmd := &cobra.Command{
 		Use:   "stats",
 		Short: "Show aggregate usage statistics from local session history",
 		Run: func(cmd *cobra.Command, args []string) {
-			showStats(outputFormat, showAllHistory, showAPICosts)
+			if showAPIPricingTemplate {
+				fmt.Print(analyze.APIPricingTemplate())
+				return
+			}
+			if apiPricingOverridePath != "" {
+				showAPICosts = true
+			}
+			showStats(outputFormat, showAllHistory, showAPICosts, apiPricingOverridePath)
 		},
 	}
 	cmd.Flags().BoolVarP(&showAllHistory, "all", "a", false, "Show statistics for all time (default: current month UTC)")
 	cmd.Flags().BoolVar(&showAPICosts, "api-costs", false, "Estimate equivalent API costs from token usage")
+	cmd.Flags().StringVar(&apiPricingOverridePath, "api-pricing", "", "Overlay built-in API pricing with model prices from a local YAML file (implies --api-costs)")
+	cmd.Flags().BoolVar(&showAPIPricingTemplate, "api-pricing-template", false, "Print a commented YAML template for --api-pricing and exit")
 	return cmd
 }
 
-func showStats(format string, showAllHistory bool, showAPICosts bool) {
+func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricingOverridePath string) {
 	home, _ := os.UserHomeDir()
 	stateDir := filepath.Join(home, ".copilot", "session-state")
 	entries, _ := os.ReadDir(stateDir)
 
 	stats := make(map[string]*analyze.ModelStat)
 	var totalPremiumRequests float64
+	var apiPricingOverrides *analyze.APIPricingOverrides
+	hasActiveAPIPricingOverrides := false
+	if apiPricingOverridePath != "" {
+		var err error
+		apiPricingOverrides, err = analyze.LoadAPIPricingOverrides(apiPricingOverridePath)
+		if err != nil {
+			log.Printf("Error loading API pricing override: %v", err)
+			return
+		}
+		hasActiveAPIPricingOverrides = apiPricingOverrides.HasActiveModels()
+	}
 
 	now := time.Now().UTC()
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -3613,7 +3635,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool) {
 		case s.Input == 0 && s.CacheRead == 0 && s.CacheWrite == 0 && s.Output == 0:
 			modelsWithoutTokenUsage = append(modelsWithoutTokenUsage, model)
 		default:
-			s.EstimatedAPICost = analyze.EstimateAPICost(model, s)
+			s.EstimatedAPICost = analyze.EstimateAPICostWithOverrides(model, s, apiPricingOverrides)
 			if s.EstimatedAPICost == nil {
 				modelsWithoutAPIPricing = append(modelsWithoutAPIPricing, model)
 				continue
@@ -3635,24 +3657,28 @@ func showStats(format string, showAllHistory bool, showAPICosts bool) {
 			"isCurrentMonthOnly":      !showAllHistory,
 		}
 		if showAPICosts {
+			apiPricingAssumption := "Estimates use built-in public API prices keyed by model ID."
+			if hasActiveAPIPricingOverrides {
+				apiPricingAssumption = fmt.Sprintf("Estimates use built-in public API prices keyed by model ID, then apply local YAML overrides from %s.", apiPricingOverrides.Path)
+			}
 			payload["estimatedApiCostUsd"] = totalEstimatedAPICostUSD
-			payload["priceCatalogVersion"] = analyze.PricingCatalogVersion
+			payload["priceCatalogVersion"] = apiPricingOverrides.CatalogVersion()
 			payload["pricedModels"] = pricedModels
 			payload["partiallyPricedModels"] = partiallyPricedModels
 			payload["modelsWithoutApiPricing"] = modelsWithoutAPIPricing
 			payload["modelsWithoutTokenUsage"] = modelsWithoutTokenUsage
-			payload["apiPricingSources"] = []string{
-				"https://developers.openai.com/api/docs/pricing",
-				"https://platform.claude.com/docs/en/about-claude/pricing",
-				"https://ai.google.dev/gemini-api/docs/pricing?hl=en",
-			}
+			payload["apiPricingSources"] = apiPricingOverrides.Sources()
 			payload["apiPricingAssumptions"] = []string{
-				"Estimates use hardcoded public API prices keyed by model ID.",
+				apiPricingAssumption,
 				"Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.",
 				"Rows are still shown when a model lacks API pricing; those rows keep request and token counts, while API totals become lower bounds.",
 				"OpenAI and Gemini pricing use standard short-context tiers; long-context, regional, storage, and batch adjustments are not modeled.",
 				"Anthropic cache reads and Gemini context-cache reads use published cached-input rates; cache writes and storage are not priced because duration is not persisted in session logs.",
 				"Active session tails without session.shutdown contribute request counts but not token-based costs.",
+			}
+			if hasActiveAPIPricingOverrides {
+				payload["apiPricingOverridePath"] = apiPricingOverrides.Path
+				payload["apiPricingOverrideModels"] = apiPricingOverrides.ModelIDs
 			}
 			payload["modelCatalogSource"] = "https://docs.github.com/en/copilot/reference/ai-models/supported-models#model-multipliers"
 		}
@@ -3738,7 +3764,11 @@ func showStats(format string, showAllHistory bool, showAPICosts bool) {
 	fmt.Println("- Overage cost uses $0.04 USD per premium request.")
 	fmt.Println("- `Premium Requests (Cost)` can be fractional because model multipliers are preserved from session shutdown metrics.")
 	if showAPICosts {
-		fmt.Println("- API cost uses hardcoded public token prices from OpenAI, Anthropic, and Google docs.")
+		if !hasActiveAPIPricingOverrides {
+			fmt.Println("- API cost uses built-in public token prices from OpenAI, Anthropic, and Google docs.")
+		} else {
+			fmt.Printf("- API cost uses built-in public token prices with local YAML overrides from %s.\n", apiPricingOverrides.Path)
+		}
 		fmt.Println("- Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.")
 		fmt.Println("- Models without API pricing still appear in the table; their `Est. API Cost` stays `-`, and the total becomes a lower bound.")
 		fmt.Println("- `Cache Read Tokens` use published cached-input or context-caching rates when the selected model has a verified read price.")

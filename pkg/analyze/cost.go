@@ -180,10 +180,14 @@ func NormalizeModelKey(s string) string {
 }
 
 func EstimateAPICost(model string, stat *ModelStat) *APICostEstimate {
+	return EstimateAPICostWithOverrides(model, stat, nil)
+}
+
+func EstimateAPICostWithOverrides(model string, stat *ModelStat, overrides *APIPricingOverrides) *APICostEstimate {
 	if stat.Input == 0 && stat.CacheRead == 0 && stat.CacheWrite == 0 && stat.Output == 0 {
 		return nil
 	}
-	price, ok := apiPricingCatalog[NormalizeModelKey(model)]
+	price, ok := resolveAPIPricingEntry(model, overrides)
 	if !ok {
 		return nil
 	}
