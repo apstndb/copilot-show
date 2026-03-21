@@ -148,6 +148,7 @@ copilot-show quota -f yaml
 The following commands are hidden by default but can be executed by specifying their names:
 
 - `agents`: List available Copilot agents
+- `model-docs`: Show a docs-backed snapshot of model release/client/plan metadata, compared with the live CLI model list
 - `skills`: List available skills (name, source, enabled, path, description)
 - `extensions`: List available extensions (id, status, source, pid)
 - `plugins`: List installed plugins (name, marketplace, version)

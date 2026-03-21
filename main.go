@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/apstndb/copilot-show/pkg/analyze"
+	"github.com/apstndb/copilot-show/pkg/modeldocs"
 	"github.com/apstndb/copilot-show/pkg/render"
 	"github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
@@ -89,6 +90,7 @@ func main() {
 
 	hiddenCmds := []*cobra.Command{
 		newAgentsCmd(client),
+		newModelDocsCmd(client),
 		newSkillsCmd(client),
 		newExtensionsCmd(client),
 		newPluginsCmd(client),
@@ -125,12 +127,6 @@ func printYAML(v interface{}) {
 	}
 	fmt.Print(string(data))
 }
-
-
-
-
-
-
 
 func withSession(ctx context.Context, client *copilot.Client, fn func(session *copilot.Session) error) error {
 	cwd, _ := os.Getwd()
@@ -380,6 +376,89 @@ func showModels(ctx context.Context, client *copilot.Client, format string) {
 	table.Render()
 	fmt.Println("\nNote: 'Included' models (e.g., GPT-4o, Claude 4.5 Sonnet) consume ZERO premium requests on paid plans.")
 	fmt.Println("Note: Premium models (e.g., Claude 4.6 Opus, o1) consume premium requests based on their multiplier.")
+}
+
+func newModelDocsCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "model-docs",
+		Short: "Show docs-backed model metadata alongside the live CLI list",
+		Run: func(cmd *cobra.Command, args []string) {
+			showModelDocs(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+func showModelDocs(ctx context.Context, client *copilot.Client, format string) {
+	models, err := client.RPC.Models.List(ctx)
+	if err != nil {
+		log.Printf("Error listing live models: %v", err)
+		return
+	}
+
+	snapshot := modeldocs.BuildSnapshot(models.Models)
+	if format == "yaml" {
+		printYAML(snapshot)
+		return
+	}
+
+	header := []string{"Name", "Release", "Copilot CLI", "Visible Now", "Task Area", "Supported Plans"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, model := range snapshot.Models {
+		taskArea := "-"
+		if model.Comparison != nil && model.Comparison.TaskArea != "" {
+			taskArea = model.Comparison.TaskArea
+		}
+
+		planNames := model.Plans.SupportedPlanNames()
+		supportedPlans := "-"
+		if len(planNames) > 0 {
+			supportedPlans = strings.Join(planNames, ", ")
+		}
+
+		table.Append([]string{
+			model.Name,
+			model.ReleaseStatus,
+			boolYesNo(model.Clients.CLI),
+			boolYesNo(model.VisibleNow),
+			taskArea,
+			supportedPlans,
+		})
+	}
+	table.Render()
+
+	fmt.Println("\nRetired Models:")
+	retiredTable := render.CreateTable([]string{"Name", "Retired On", "Suggested Alternative"}, nil, false, false, tableMode)
+	for _, model := range snapshot.RetiredModels {
+		retiredTable.Append([]string{model.Name, model.RetirementDate, model.SuggestedAlternative})
+	}
+	retiredTable.Render()
+
+	if len(snapshot.LiveModelsWithoutDocs) > 0 {
+		fmt.Println("\nLive Models Without Docs Snapshot Match:")
+		liveTable := render.CreateTable([]string{"ID", "Name", "State"}, nil, false, false, tableMode)
+		for _, model := range snapshot.LiveModelsWithoutDocs {
+			state := "-"
+			if model.PolicyState != "" {
+				state = model.PolicyState
+			}
+			liveTable.Append([]string{model.ID, model.Name, state})
+		}
+		liveTable.Render()
+	}
+
+	fmt.Println("\nNotes:")
+	fmt.Printf("- Catalog version: %s\n", snapshot.CatalogVersion)
+	fmt.Println("- This command uses an explicitly refreshed snapshot of github/docs `data/tables/copilot`, not a runtime source of truth.")
+	fmt.Println("- `Copilot CLI` comes from the docs-supported client matrix.")
+	fmt.Println("- `Visible Now` comes from the local Copilot CLI server and can vary by plan, organization policy, rollout, and account state.")
+	fmt.Println("- Use `-f yaml` for the full per-client, per-plan, and model-card metadata.")
+}
+
+func boolYesNo(v bool) string {
+	if v {
+		return "Yes"
+	}
+	return "No"
 }
 
 func newToolsCmd(client *copilot.Client) *cobra.Command {
