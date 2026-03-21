@@ -1,0 +1,6 @@
+{
+  "repo": "https://github.com/github/docs",
+  "ref": "main",
+  "commit": "7cbca58400edbc80b22512947ec96563bc984bf1",
+  "snapshotPath": "pkg/modeldocs/snapshot"
+}

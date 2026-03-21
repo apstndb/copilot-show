@@ -28,8 +28,6 @@ Available subcommands:
 - `usage`: Show billing usage report from GitHub API, with model multipliers and entitlement joined from the models list and quota snapshots.
 - `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
 - `turns`: Show turn-by-turn usage statistics for a session.
-- `sessions`: List recent Copilot CLI sessions.
-- `history`: Show event history for a session.
 
 ### Common Options
 
@@ -148,7 +146,7 @@ copilot-show quota -f yaml
 The following commands are hidden by default but can be executed by specifying their names:
 
 - `agents`: List available Copilot agents
-- `model-docs`: Show a docs-backed snapshot of model release/client/plan metadata, compared with the live CLI model list
+- `model-docs`: Show an embedded docs snapshot of model release/client/plan metadata, compared with the live CLI model list (`--latest` tries fresh github/docs data first)
 - `skills`: List available skills (name, source, enabled, path, description)
 - `extensions`: List available extensions (id, status, source, pid)
 - `plugins`: List installed plugins (name, marketplace, version)

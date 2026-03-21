@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,6 @@ import (
 )
 
 const (
-	version      = "0.1.5"
 	uiVersionOld = "old"
 	uiVersionNew = "new"
 
@@ -43,10 +43,56 @@ const (
 )
 
 var (
+	// version can be injected at build time with:
+	//   go build -ldflags "-X main.version=v0.1.6"
+	version      string
 	outputFormat string
 	tableMode    string
 	uiVersion    string
 )
+
+func cliVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	return resolveVersion(version, info, ok)
+}
+
+func resolveVersion(explicit string, info *debug.BuildInfo, ok bool) string {
+	if explicit != "" {
+		return explicit
+	}
+	if !ok || info == nil {
+		return "(unknown)"
+	}
+	if info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	revision := buildSettingValue(info, "vcs.revision")
+	if revision != "" {
+		if len(revision) > 12 {
+			revision = revision[:12]
+		}
+		if buildSettingValue(info, "vcs.modified") == "true" {
+			return revision + "-dirty"
+		}
+		return revision
+	}
+	if info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "(unknown)"
+}
+
+func buildSettingValue(info *debug.BuildInfo, key string) string {
+	if info == nil {
+		return ""
+	}
+	for _, setting := range info.Settings {
+		if setting.Key == key {
+			return setting.Value
+		}
+	}
+	return ""
+}
 
 func main() {
 	// 1. Initialize Copilot CLI client
@@ -60,7 +106,7 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:     "copilot-show",
 		Short:   "A tool to inspect GitHub Copilot information",
-		Version: "0.1.5",
+		Version: cliVersion(),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			switch uiVersion {
 			case uiVersionOld, uiVersionNew:
@@ -106,7 +152,6 @@ func main() {
 		newSessionsCmd(client),
 		newHistoryCmd(client),
 		newGraphCmd(client),
-		newTurnsCmd(client),
 	}
 	for _, c := range hiddenCmds {
 		c.Hidden = true
@@ -379,23 +424,33 @@ func showModels(ctx context.Context, client *copilot.Client, format string) {
 }
 
 func newModelDocsCmd(client *copilot.Client) *cobra.Command {
-	return &cobra.Command{
+	var useLatest bool
+	cmd := &cobra.Command{
 		Use:   "model-docs",
 		Short: "Show docs-backed model metadata alongside the live CLI list",
 		Run: func(cmd *cobra.Command, args []string) {
-			showModelDocs(cmd.Context(), client, outputFormat)
+			showModelDocs(cmd.Context(), client, outputFormat, useLatest)
 		},
 	}
+	cmd.Flags().BoolVar(&useLatest, "latest", false, "Attempt to fetch the latest github/docs copilot tables before falling back to the embedded snapshot")
+	return cmd
 }
 
-func showModelDocs(ctx context.Context, client *copilot.Client, format string) {
+func showModelDocs(ctx context.Context, client *copilot.Client, format string, useLatest bool) {
 	models, err := client.RPC.Models.List(ctx)
 	if err != nil {
 		log.Printf("Error listing live models: %v", err)
 		return
 	}
 
-	snapshot := modeldocs.BuildSnapshot(models.Models)
+	snapshot, err := modeldocs.BuildSnapshotWithOptions(ctx, models.Models, modeldocs.SnapshotOptions{PreferLatest: useLatest})
+	if err != nil {
+		log.Printf("Error loading model docs snapshot: %v", err)
+		return
+	}
+	for _, warning := range snapshot.LoadWarnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	}
 	if format == "yaml" {
 		printYAML(snapshot)
 		return
@@ -448,10 +503,17 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string) {
 
 	fmt.Println("\nNotes:")
 	fmt.Printf("- Catalog version: %s\n", snapshot.CatalogVersion)
-	fmt.Println("- This command uses an explicitly refreshed snapshot of github/docs `data/tables/copilot`, not a runtime source of truth.")
+	fmt.Printf("- Loaded from: %s\n", snapshot.LoadedFrom)
+	fmt.Println("- This command uses an embedded snapshot refreshed from github/docs at a recorded commit; `scripts/update-modeldocs-snapshot.sh` refreshes it, and `--latest` attempts fresh github/docs data with embedded fallback on fetch or compatibility errors.")
 	fmt.Println("- `Copilot CLI` comes from the docs-supported client matrix.")
 	fmt.Println("- `Visible Now` comes from the local Copilot CLI server and can vary by plan, organization policy, rollout, and account state.")
 	fmt.Println("- Use `-f yaml` for the full per-client, per-plan, and model-card metadata.")
+	if len(snapshot.LoadWarnings) > 0 {
+		fmt.Println("- Warnings:")
+		for _, warning := range snapshot.LoadWarnings {
+			fmt.Printf("  - %s\n", warning)
+		}
+	}
 }
 
 func boolYesNo(v bool) string {
