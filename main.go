@@ -129,6 +129,7 @@ func main() {
 
 	rootCmd.AddCommand(newQuotaCmd(client))
 	rootCmd.AddCommand(newModelsCmd(client))
+	rootCmd.AddCommand(newModelDocsCmd(client))
 	rootCmd.AddCommand(newToolsCmd(client))
 	rootCmd.AddCommand(newStatsCmd())
 	rootCmd.AddCommand(newUsageCmd(client))
@@ -136,7 +137,6 @@ func main() {
 
 	hiddenCmds := []*cobra.Command{
 		newAgentsCmd(client),
-		newModelDocsCmd(client),
 		newSkillsCmd(client),
 		newExtensionsCmd(client),
 		newPluginsCmd(client),
@@ -341,102 +341,239 @@ func showModels(ctx context.Context, client *copilot.Client, format string) {
 		return
 	}
 
+	snapshot := modeldocs.BuildSnapshot(models.Models)
+	for _, warning := range snapshot.LoadWarnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
+	}
+	modelSnapshot := buildRuntimeModelsSnapshot(models.Models, snapshot)
+
 	if format == "yaml" {
-		printYAML(models)
+		printYAML(modelSnapshot)
 		return
 	}
 
 	header := []string{"ID", "Name", "Multiplier", "Context", "Output", "Prompt", "Vision", "Reasoning", "Efforts", "State"}
 	table := render.CreateTable(header, []int{2, 3, 4, 5}, false, false, tableMode)
 
-	for _, m := range models.Models {
-		multiplier := "-"
-		multiplierNum := 0.0
-		if m.Billing != nil {
-			multiplierNum = m.Billing.Multiplier
-			multiplier = strconv.FormatFloat(multiplierNum, 'f', -1, 64)
-		}
-
-		ctxTokens := fmt.Sprintf("%.0f", m.Capabilities.Limits.MaxContextWindowTokens)
-
-		outTokens := "-"
-		if m.Capabilities.Limits.MaxOutputTokens != nil {
-			outTokens = fmt.Sprintf("%.0f", *m.Capabilities.Limits.MaxOutputTokens)
-		}
-
-		pmtTokens := "-"
-		if m.Capabilities.Limits.MaxPromptTokens != nil {
-			pmtTokens = fmt.Sprintf("%.0f", *m.Capabilities.Limits.MaxPromptTokens)
-		}
-
-		vision := "No"
-		if m.Capabilities.Supports.Vision != nil && *m.Capabilities.Supports.Vision {
-			vision = "Yes"
-		}
-
-		reasoning := "No"
-		if m.Capabilities.Supports.ReasoningEffort != nil && *m.Capabilities.Supports.ReasoningEffort {
-			reasoning = "Yes"
-			if m.DefaultReasoningEffort != nil {
-				reasoning += fmt.Sprintf(" (%s)", *m.DefaultReasoningEffort)
-			}
-		}
-
-		efforts := "-"
-		if len(m.SupportedReasoningEfforts) > 0 {
-			efforts = ""
-			for i, e := range m.SupportedReasoningEfforts {
-				if i > 0 {
-					efforts += ", "
-				}
-				efforts += e
-			}
-		}
-
-		policyState := "-"
-		if m.Policy != nil {
-			policyState = m.Policy.State
-		}
-
-		row := []string{
-			m.ID,
-			m.Name,
-			multiplier,
-			ctxTokens,
-			outTokens,
-			pmtTokens,
-			vision,
-			reasoning,
-			efforts,
-			policyState,
-		}
-
-		if multiplierNum == 0 && (policyState == "enabled" || policyState == "default") {
-			// Included models (Free/No premium request cost)
-			row[2] = "Included (0)"
-		}
-
-		table.Append(row)
+	for _, model := range modelSnapshot.Models {
+		table.Append([]string{
+			model.ID,
+			model.Name,
+			model.MultiplierDisplay,
+			fmt.Sprintf("%.0f", model.MaxContextWindowTokens),
+			formatOptionalTokenLimit(model.MaxOutputTokens),
+			formatOptionalTokenLimit(model.MaxPromptTokens),
+			boolYesNo(model.SupportsVision),
+			formatReasoningSupport(model.SupportsReasoning, model.DefaultReasoningEffort),
+			formatReasoningEfforts(model.SupportedReasoningEfforts),
+			formatOptionalText(model.State),
+		})
 	}
 	table.Render()
-	fmt.Println("\nNote: 'Included' models (e.g., GPT-4o, Claude 4.5 Sonnet) consume ZERO premium requests on paid plans.")
-	fmt.Println("Note: Premium models (e.g., Claude 4.6 Opus, o1) consume premium requests based on their multiplier.")
+	fmt.Println("\nNotes:")
+	fmt.Println("- `Multiplier` prefers the docs-backed paid multiplier from github/docs for docs-known models.")
+	fmt.Println("- Runtime-only models without a docs match fall back to the live Copilot SDK billing multiplier.")
+	fmt.Printf("- Multiplier catalog version: %s (%s)\n", modelSnapshot.ModelCatalogVersion, modelSnapshot.ModelCatalogLoadedFrom)
+	fmt.Println("- Free-plan multipliers are loaded too, but `models` currently displays the paid-plan column.")
+	if len(modelSnapshot.ModelCatalogWarnings) > 0 {
+		fmt.Println("- Warnings:")
+		for _, warning := range modelSnapshot.ModelCatalogWarnings {
+			fmt.Printf("  - %s\n", warning)
+		}
+	}
+}
+
+type runtimeModelsSnapshot struct {
+	ModelCatalogSource     string             `json:"modelCatalogSource" yaml:"modelCatalogSource"`
+	ModelCatalogVersion    string             `json:"modelCatalogVersion,omitempty" yaml:"modelCatalogVersion,omitempty"`
+	ModelCatalogLoadedFrom string             `json:"modelCatalogLoadedFrom,omitempty" yaml:"modelCatalogLoadedFrom,omitempty"`
+	ModelCatalogWarnings   []string           `json:"modelCatalogWarnings,omitempty" yaml:"modelCatalogWarnings,omitempty"`
+	MultiplierPlan         string             `json:"multiplierPlan" yaml:"multiplierPlan"`
+	Models                 []runtimeModelView `json:"models" yaml:"models"`
+}
+
+type runtimeModelView struct {
+	ID                        string                        `json:"id" yaml:"id"`
+	Name                      string                        `json:"name" yaml:"name"`
+	MultiplierDisplay         string                        `json:"multiplierDisplay" yaml:"multiplierDisplay"`
+	SelectedMultiplier        *float64                      `json:"selectedMultiplier,omitempty" yaml:"selectedMultiplier,omitempty"`
+	MultiplierSource          string                        `json:"multiplierSource" yaml:"multiplierSource"`
+	DocsMultipliers           *modeldocs.RequestMultipliers `json:"docsMultipliers,omitempty" yaml:"docsMultipliers,omitempty"`
+	LiveMultiplier            *float64                      `json:"liveMultiplier,omitempty" yaml:"liveMultiplier,omitempty"`
+	MaxContextWindowTokens    float64                       `json:"maxContextWindowTokens" yaml:"maxContextWindowTokens"`
+	MaxOutputTokens           *float64                      `json:"maxOutputTokens,omitempty" yaml:"maxOutputTokens,omitempty"`
+	MaxPromptTokens           *float64                      `json:"maxPromptTokens,omitempty" yaml:"maxPromptTokens,omitempty"`
+	SupportsVision            bool                          `json:"supportsVision" yaml:"supportsVision"`
+	SupportsReasoning         bool                          `json:"supportsReasoning" yaml:"supportsReasoning"`
+	DefaultReasoningEffort    string                        `json:"defaultReasoningEffort,omitempty" yaml:"defaultReasoningEffort,omitempty"`
+	SupportedReasoningEfforts []string                      `json:"supportedReasoningEfforts,omitempty" yaml:"supportedReasoningEfforts,omitempty"`
+	State                     string                        `json:"state,omitempty" yaml:"state,omitempty"`
+}
+
+func buildRuntimeModelsSnapshot(models []rpc.Model, snapshot modeldocs.Snapshot) runtimeModelsSnapshot {
+	docsMultipliers := buildDocsMultiplierMap(snapshot.Models)
+	result := runtimeModelsSnapshot{
+		ModelCatalogSource:     snapshot.Sources.ModelMultipliers,
+		ModelCatalogVersion:    snapshot.CatalogVersion,
+		ModelCatalogLoadedFrom: snapshot.LoadedFrom,
+		ModelCatalogWarnings:   append([]string(nil), snapshot.LoadWarnings...),
+		MultiplierPlan:         "paid",
+		Models:                 make([]runtimeModelView, 0, len(models)),
+	}
+	for _, model := range models {
+		docsMultiplier := lookupDocsMultipliers(model, docsMultipliers)
+		liveMultiplier := liveBillingMultiplier(model)
+		selectedMultiplier, multiplierSource := selectModelMultiplier(docsMultiplier, liveMultiplier)
+
+		supportsVision := model.Capabilities.Supports.Vision != nil && *model.Capabilities.Supports.Vision
+		supportsReasoning := model.Capabilities.Supports.ReasoningEffort != nil && *model.Capabilities.Supports.ReasoningEffort
+
+		policyState := ""
+		if model.Policy != nil {
+			policyState = model.Policy.State
+		}
+
+		result.Models = append(result.Models, runtimeModelView{
+			ID:                        model.ID,
+			Name:                      model.Name,
+			MultiplierDisplay:         formatMultiplierValue(selectedMultiplier),
+			SelectedMultiplier:        cloneOptionalFloat(selectedMultiplier),
+			MultiplierSource:          multiplierSource,
+			DocsMultipliers:           cloneModeldocsRequestMultipliers(docsMultiplier),
+			LiveMultiplier:            cloneOptionalFloat(liveMultiplier),
+			MaxContextWindowTokens:    model.Capabilities.Limits.MaxContextWindowTokens,
+			MaxOutputTokens:           cloneOptionalFloat(model.Capabilities.Limits.MaxOutputTokens),
+			MaxPromptTokens:           cloneOptionalFloat(model.Capabilities.Limits.MaxPromptTokens),
+			SupportsVision:            supportsVision,
+			SupportsReasoning:         supportsReasoning,
+			DefaultReasoningEffort:    derefString(model.DefaultReasoningEffort),
+			SupportedReasoningEfforts: append([]string(nil), model.SupportedReasoningEfforts...),
+			State:                     policyState,
+		})
+	}
+	return result
+}
+
+func buildDocsMultiplierMap(models []modeldocs.JoinedModel) map[string]*modeldocs.RequestMultipliers {
+	multipliers := make(map[string]*modeldocs.RequestMultipliers, len(models))
+	for _, model := range models {
+		key := modeldocs.NormalizeModelNameKey(model.Name)
+		if key == "" || model.Multipliers == nil {
+			continue
+		}
+		multipliers[key] = model.Multipliers
+	}
+	return multipliers
+}
+
+func lookupDocsMultipliers(model rpc.Model, multipliers map[string]*modeldocs.RequestMultipliers) *modeldocs.RequestMultipliers {
+	nameKey := modeldocs.NormalizeModelNameKey(model.Name)
+	if multipliers[nameKey] != nil {
+		return multipliers[nameKey]
+	}
+	idKey := modeldocs.NormalizeModelNameKey(model.ID)
+	if idKey != "" {
+		return multipliers[idKey]
+	}
+	return nil
+}
+
+func liveBillingMultiplier(model rpc.Model) *float64 {
+	if model.Billing == nil {
+		return nil
+	}
+	multiplier := model.Billing.Multiplier
+	return &multiplier
+}
+
+func selectModelMultiplier(docsMultiplier *modeldocs.RequestMultipliers, liveMultiplier *float64) (*float64, string) {
+	if docsMultiplier != nil && docsMultiplier.Paid != nil {
+		return docsMultiplier.Paid, "github/docs paid"
+	}
+	if liveMultiplier != nil {
+		return liveMultiplier, "copilot-sdk live"
+	}
+	return nil, "unavailable"
+}
+
+func cloneModeldocsRequestMultipliers(multipliers *modeldocs.RequestMultipliers) *modeldocs.RequestMultipliers {
+	if multipliers == nil {
+		return nil
+	}
+	cloned := &modeldocs.RequestMultipliers{}
+	if multipliers.Paid != nil {
+		paid := *multipliers.Paid
+		cloned.Paid = &paid
+	}
+	if multipliers.Free != nil {
+		free := *multipliers.Free
+		cloned.Free = &free
+	}
+	return cloned
+}
+
+func cloneOptionalFloat(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func formatOptionalTokenLimit(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f", *value)
+}
+
+func formatReasoningSupport(supported bool, defaultEffort string) string {
+	if !supported {
+		return "No"
+	}
+	if defaultEffort == "" {
+		return "Yes"
+	}
+	return fmt.Sprintf("Yes (%s)", defaultEffort)
+}
+
+func formatReasoningEfforts(efforts []string) string {
+	if len(efforts) == 0 {
+		return "-"
+	}
+	return strings.Join(efforts, ", ")
+}
+
+func formatOptionalText(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
 }
 
 func newModelDocsCmd(client *copilot.Client) *cobra.Command {
 	var useLatest bool
+	var showAll bool
 	cmd := &cobra.Command{
 		Use:   "model-docs",
-		Short: "Show docs-backed model metadata alongside the live CLI list",
+		Short: "Show CLI-focused model metadata from github/docs and the live CLI list",
 		Run: func(cmd *cobra.Command, args []string) {
-			showModelDocs(cmd.Context(), client, outputFormat, useLatest)
+			showModelDocs(cmd.Context(), client, outputFormat, useLatest, showAll)
 		},
 	}
 	cmd.Flags().BoolVar(&useLatest, "latest", false, "Attempt to fetch the latest github/docs copilot tables before falling back to the embedded snapshot")
+	cmd.Flags().BoolVar(&showAll, "all", false, "Include docs-backed metadata that is not specific to Copilot CLI")
 	return cmd
 }
 
-func showModelDocs(ctx context.Context, client *copilot.Client, format string, useLatest bool) {
+func showModelDocs(ctx context.Context, client *copilot.Client, format string, useLatest bool, showAll bool) {
 	models, err := client.RPC.Models.List(ctx)
 	if err != nil {
 		log.Printf("Error listing live models: %v", err)
@@ -451,14 +588,24 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 	for _, warning := range snapshot.LoadWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
+	cliModels := copilotCLIModelDocs(snapshot.Models)
 	if format == "yaml" {
-		printYAML(snapshot)
+		if showAll {
+			printYAML(snapshot)
+		} else {
+			printYAML(buildCLIFocusedModelDocsSnapshot(snapshot))
+		}
 		return
 	}
 
-	header := []string{"Name", "Release", "Copilot CLI", "Visible Now", "Task Area", "Supported Plans"}
+	header := []string{"Name", "Provider", "Release", "Multiplier", "Visible Now", "Supported Plans"}
+	displayModels := cliModels
+	if showAll {
+		header = []string{"Name", "Provider", "Release", "Multiplier", "Copilot CLI", "Visible Now", "Supported Plans", "Agent", "Ask", "Edit", "Task Area"}
+		displayModels = snapshot.Models
+	}
 	table := render.CreateTable(header, nil, false, false, tableMode)
-	for _, model := range snapshot.Models {
+	for _, model := range displayModels {
 		taskArea := "-"
 		if model.Comparison != nil && model.Comparison.TaskArea != "" {
 			taskArea = model.Comparison.TaskArea
@@ -470,33 +617,51 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 			supportedPlans = strings.Join(planNames, ", ")
 		}
 
-		table.Append([]string{
-			model.Name,
-			model.ReleaseStatus,
-			boolYesNo(model.Clients.CLI),
-			boolYesNo(model.VisibleNow),
-			taskArea,
-			supportedPlans,
-		})
+		if showAll {
+			table.Append([]string{
+				model.Name,
+				model.Provider,
+				model.ReleaseStatus,
+				formatJoinedModelMultiplier(model),
+				boolYesNo(model.Clients.CLI),
+				boolYesNo(model.VisibleNow),
+				supportedPlans,
+				boolYesNo(model.Modes.Agent),
+				boolYesNo(model.Modes.Ask),
+				boolYesNo(model.Modes.Edit),
+				taskArea,
+			})
+		} else {
+			table.Append([]string{
+				model.Name,
+				model.Provider,
+				model.ReleaseStatus,
+				formatJoinedModelMultiplier(model),
+				boolYesNo(model.VisibleNow),
+				supportedPlans,
+			})
+		}
 	}
 	table.Render()
 
-	fmt.Println("\nRetired Models:")
-	retiredTable := render.CreateTable([]string{"Name", "Retired On", "Suggested Alternative"}, nil, false, false, tableMode)
-	for _, model := range snapshot.RetiredModels {
-		retiredTable.Append([]string{model.Name, model.RetirementDate, model.SuggestedAlternative})
+	if showAll && len(snapshot.RetiredModels) > 0 {
+		fmt.Println("\nRetired Models:")
+		retiredTable := render.CreateTable([]string{"Name", "Retired On", "Suggested Alternative"}, nil, false, false, tableMode)
+		for _, model := range snapshot.RetiredModels {
+			retiredTable.Append([]string{model.Name, model.RetirementDate, model.SuggestedAlternative})
+		}
+		retiredTable.Render()
 	}
-	retiredTable.Render()
 
 	if len(snapshot.LiveModelsWithoutDocs) > 0 {
 		fmt.Println("\nLive Models Without Docs Snapshot Match:")
-		liveTable := render.CreateTable([]string{"ID", "Name", "State"}, nil, false, false, tableMode)
+		liveTable := render.CreateTable([]string{"ID", "Name", "State", "Multiplier"}, nil, false, false, tableMode)
 		for _, model := range snapshot.LiveModelsWithoutDocs {
 			state := "-"
 			if model.PolicyState != "" {
 				state = model.PolicyState
 			}
-			liveTable.Append([]string{model.ID, model.Name, state})
+			liveTable.Append([]string{model.ID, model.Name, state, formatModelDocsLiveMultipliers([]modeldocs.LiveMatch{model})})
 		}
 		liveTable.Render()
 	}
@@ -505,14 +670,122 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 	fmt.Printf("- Catalog version: %s\n", snapshot.CatalogVersion)
 	fmt.Printf("- Loaded from: %s\n", snapshot.LoadedFrom)
 	fmt.Println("- This command uses an embedded snapshot refreshed from github/docs at a recorded commit; `scripts/update-modeldocs-snapshot.sh` refreshes it, and `--latest` attempts fresh github/docs data with embedded fallback on fetch or compatibility errors.")
-	fmt.Println("- `Copilot CLI` comes from the docs-supported client matrix.")
+	fmt.Println("- `Multiplier` prefers the docs-backed paid multiplier from github/docs and only falls back to live CLI billing when the docs snapshot has no multiplier for a visible row.")
 	fmt.Println("- `Visible Now` comes from the local Copilot CLI server and can vary by plan, organization policy, rollout, and account state.")
-	fmt.Println("- Use `-f yaml` for the full per-client, per-plan, and model-card metadata.")
+	if showAll {
+		fmt.Println("- `Copilot CLI` comes from the docs-supported client matrix.")
+		fmt.Println("- `Provider`, `Agent`, `Ask`, `Edit`, and `Task Area` come from docs-backed model metadata.")
+		fmt.Println("- Retired models are listed only with `--all`.")
+		fmt.Println("- Free-plan multipliers are stored in YAML too, but this command currently displays the paid-plan multiplier column.")
+		fmt.Println("- Use `-f yaml` for the full provider, mode, per-client, per-plan, and model-card metadata.")
+	} else {
+		fmt.Printf("- Showing %d docs-backed models that support Copilot CLI.\n", len(cliModels))
+		fmt.Println("- Models without Copilot CLI support and retired-model history are hidden by default. Use `--all` to include them and expose broader docs-backed metadata.")
+		fmt.Println("- Free-plan multipliers are stored in YAML too, but this command currently displays the paid-plan multiplier column.")
+		fmt.Println("- Use `-f yaml --all` for the full provider, mode, per-client, per-plan, and model-card metadata.")
+	}
 	if len(snapshot.LoadWarnings) > 0 {
 		fmt.Println("- Warnings:")
 		for _, warning := range snapshot.LoadWarnings {
 			fmt.Printf("  - %s\n", warning)
 		}
+	}
+}
+
+func copilotCLIModelDocs(models []modeldocs.JoinedModel) []modeldocs.JoinedModel {
+	cliModels := make([]modeldocs.JoinedModel, 0, len(models))
+	for _, model := range models {
+		if !model.Clients.CLI {
+			continue
+		}
+		cliModels = append(cliModels, model)
+	}
+	return cliModels
+}
+
+func formatModelDocsLiveMultipliers(matches []modeldocs.LiveMatch) string {
+	if len(matches) == 0 {
+		return "-"
+	}
+
+	seen := make(map[string]struct{}, len(matches))
+	values := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if match.BillingMultiplier == nil {
+			continue
+		}
+		value := formatMultiplierValue(match.BillingMultiplier)
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ", ")
+}
+
+func formatJoinedModelMultiplier(model modeldocs.JoinedModel) string {
+	if model.Multipliers != nil && model.Multipliers.Paid != nil {
+		return formatMultiplierValue(model.Multipliers.Paid)
+	}
+	return formatModelDocsLiveMultipliers(model.LiveModels)
+}
+
+func formatMultiplierValue(multiplier *float64) string {
+	if multiplier == nil {
+		return "-"
+	}
+	if *multiplier == 0 {
+		return "Included (0)"
+	}
+	return strconv.FormatFloat(*multiplier, 'f', -1, 64)
+}
+
+type cliFocusedModelDocsSnapshot struct {
+	CatalogVersion        string                `json:"catalogVersion" yaml:"catalogVersion"`
+	SourceNote            string                `json:"sourceNote" yaml:"sourceNote"`
+	Sources               modeldocs.Sources     `json:"sources" yaml:"sources"`
+	LoadedFrom            string                `json:"loadedFrom" yaml:"loadedFrom"`
+	LoadWarnings          []string              `json:"loadWarnings,omitempty" yaml:"loadWarnings,omitempty"`
+	Models                []cliFocusedModelDocs `json:"models" yaml:"models"`
+	LiveModelsWithoutDocs []modeldocs.LiveMatch `json:"liveModelsWithoutDocs,omitempty" yaml:"liveModelsWithoutDocs,omitempty"`
+}
+
+type cliFocusedModelDocs struct {
+	Name          string                        `json:"name" yaml:"name"`
+	Provider      string                        `json:"provider" yaml:"provider"`
+	ReleaseStatus string                        `json:"releaseStatus" yaml:"releaseStatus"`
+	VisibleNow    bool                          `json:"visibleNow" yaml:"visibleNow"`
+	Plans         modeldocs.PlanAvailability    `json:"plans" yaml:"plans"`
+	Multipliers   *modeldocs.RequestMultipliers `json:"multipliers,omitempty" yaml:"multipliers,omitempty"`
+	LiveModels    []modeldocs.LiveMatch         `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
+}
+
+func buildCLIFocusedModelDocsSnapshot(snapshot modeldocs.Snapshot) cliFocusedModelDocsSnapshot {
+	cliModels := copilotCLIModelDocs(snapshot.Models)
+	models := make([]cliFocusedModelDocs, 0, len(cliModels))
+	for _, model := range cliModels {
+		models = append(models, cliFocusedModelDocs{
+			Name:          model.Name,
+			Provider:      model.Provider,
+			ReleaseStatus: model.ReleaseStatus,
+			VisibleNow:    model.VisibleNow,
+			Plans:         model.Plans,
+			Multipliers:   cloneModeldocsRequestMultipliers(model.Multipliers),
+			LiveModels:    append([]modeldocs.LiveMatch(nil), model.LiveModels...),
+		})
+	}
+	return cliFocusedModelDocsSnapshot{
+		CatalogVersion:        snapshot.CatalogVersion,
+		SourceNote:            snapshot.SourceNote,
+		Sources:               snapshot.Sources,
+		LoadedFrom:            snapshot.LoadedFrom,
+		LoadWarnings:          append([]string(nil), snapshot.LoadWarnings...),
+		Models:                models,
+		LiveModelsWithoutDocs: append([]modeldocs.LiveMatch(nil), snapshot.LiveModelsWithoutDocs...),
 	}
 }
 
@@ -1694,7 +1967,9 @@ type sessionEvent struct {
 	Type      string
 	ParentID  string
 	Timestamp time.Time
+	Ephemeral *bool
 	Data      map[string]any
+	RawData   any
 }
 
 type sessionTurnWindow struct {
@@ -1944,15 +2219,126 @@ func loadSessionRawEvents(sessionID string) ([]map[string]any, error) {
 	return events, nil
 }
 
+func boolPtrFromAny(value any) *bool {
+	b, ok := value.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
+}
+
+var (
+	plausibleSessionTimestampMin = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	plausibleSessionTimestampMax = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+func isPlausibleSessionTimestamp(ts time.Time) bool {
+	return !ts.Before(plausibleSessionTimestampMin) && ts.Before(plausibleSessionTimestampMax)
+}
+
+func parseUnixTimestampInteger(value int64) (time.Time, bool) {
+	// Numeric timestamps appear in mixed sec/ms/us/ns forms. Prefer the first
+	// interpretation that lands in a plausible Copilot CLI time range before
+	// falling back to a magnitude-only guess for outliers.
+	candidates := []time.Time{
+		time.Unix(value, 0).UTC(),
+		time.UnixMilli(value).UTC(),
+		time.UnixMicro(value).UTC(),
+		time.Unix(0, value).UTC(),
+	}
+	for _, ts := range candidates {
+		if isPlausibleSessionTimestamp(ts) {
+			return ts, true
+		}
+	}
+
+	switch {
+	case value >= 1e18 || value <= -1e18:
+		return time.Unix(0, value).UTC(), true
+	case value >= 1e15 || value <= -1e15:
+		return time.Unix(0, value*int64(time.Microsecond)).UTC(), true
+	case value >= 1e12 || value <= -1e12:
+		return time.Unix(0, value*int64(time.Millisecond)).UTC(), true
+	default:
+		return time.Unix(value, 0).UTC(), true
+	}
+}
+
+func parseUnixTimestampFloat(value float64) (time.Time, bool) {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return time.Time{}, false
+	}
+	whole, frac := math.Modf(value)
+	if frac != 0 {
+		for _, scale := range []float64{1, 1e3, 1e6, 1e9} {
+			scaled := value / scale
+			scaledWhole, scaledFrac := math.Modf(scaled)
+			ts := time.Unix(int64(scaledWhole), int64(scaledFrac*float64(time.Second))).UTC()
+			if isPlausibleSessionTimestamp(ts) {
+				return ts, true
+			}
+		}
+		return time.Unix(int64(whole), int64(frac*float64(time.Second))).UTC(), true
+	}
+	return parseUnixTimestampInteger(int64(whole))
+}
+
+func parseSessionTimestamp(value any) (time.Time, bool) {
+	switch v := value.(type) {
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02T15:04:05.999999999Z0700",
+			"2006-01-02T15:04:05Z0700",
+			"2006-01-02 15:04:05.999999999Z07:00",
+			"2006-01-02 15:04:05Z07:00",
+		} {
+			if ts, err := time.Parse(layout, v); err == nil {
+				return ts, true
+			}
+		}
+		if unixValue, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return parseUnixTimestampInteger(unixValue)
+		}
+		if unixValue, err := strconv.ParseFloat(v, 64); err == nil {
+			return parseUnixTimestampFloat(unixValue)
+		}
+	case float64:
+		return parseUnixTimestampFloat(v)
+	case int:
+		return parseUnixTimestampInteger(int64(v))
+	case int64:
+		return parseUnixTimestampInteger(v)
+	case json.Number:
+		if unixValue, err := v.Int64(); err == nil {
+			return parseUnixTimestampInteger(unixValue)
+		}
+		if unixValue, err := v.Float64(); err == nil {
+			return parseUnixTimestampFloat(unixValue)
+		}
+	}
+	return time.Time{}, false
+}
+
 func parseSessionEvent(raw map[string]any) *sessionEvent {
-	timestampStr, _ := raw["timestamp"].(string)
-	ts, err := time.Parse(time.RFC3339, timestampStr)
-	if err != nil {
+	ts, ok := parseSessionTimestamp(raw["timestamp"])
+	if !ok {
 		return nil
 	}
 
-	data, _ := raw["data"].(map[string]any)
+	// Keep event parsing intentionally schema-light so local log analysis still
+	// works when Copilot CLI starts emitting new event types before copilot-sdk
+	// has caught up with a newer generated schema.
+	rawData := raw["data"]
+	data, _ := rawData.(map[string]any)
 	id, _ := raw["id"].(string)
+	// parentId is the event-level lineage edge. parentToolCallId stays inside Data
+	// and forms a separate tool-span lineage used for nested task/subagent work.
 	parentID, _ := raw["parentId"].(string)
 	evType, _ := raw["type"].(string)
 
@@ -1961,7 +2347,9 @@ func parseSessionEvent(raw map[string]any) *sessionEvent {
 		Type:      evType,
 		ParentID:  parentID,
 		Timestamp: ts,
+		Ephemeral: boolPtrFromAny(raw["ephemeral"]),
 		Data:      data,
+		RawData:   rawData,
 	}
 }
 
@@ -1992,6 +2380,26 @@ func dataString(data map[string]any, key string) string {
 	return value
 }
 
+func dataScalarString(data map[string]any, key string) string {
+	if data == nil {
+		return ""
+	}
+	return scalarString(data[key])
+}
+
+func scalarString(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case json.Number:
+		return v.String()
+	case bool, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%v", v)
+	default:
+		return ""
+	}
+}
+
 func nestedDataString(data map[string]any, keys ...string) string {
 	current := data
 	for i, key := range keys {
@@ -2004,6 +2412,15 @@ func nestedDataString(data map[string]any, keys ...string) string {
 		}
 		next, _ := current[key].(map[string]any)
 		current = next
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
 	}
 	return ""
 }
@@ -2055,6 +2472,10 @@ func eventText(data map[string]any) string {
 		text = dataString(data, "transformedContent")
 	}
 	return normalizeInlineText(text)
+}
+
+func inlineScalarText(value string) string {
+	return truncateRunes(normalizeInlineText(value), 120)
 }
 
 func truncateRunes(text string, limit int) string {
@@ -2580,6 +3001,178 @@ func describeSessionModelChange(ev *sessionEvent) (string, string, []string) {
 	return "Model Changed", detail, extraLines
 }
 
+func historyEventFamilyLabel(eventType string) string {
+	switch {
+	case strings.HasPrefix(eventType, "assistant."):
+		return "Assistant Event"
+	case strings.HasPrefix(eventType, "session."):
+		return "Session Event"
+	case strings.HasPrefix(eventType, "tool."):
+		return "Tool Event"
+	case strings.HasPrefix(eventType, "subagent."):
+		return "Subagent Event"
+	case strings.HasPrefix(eventType, "skill."):
+		return "Skill Event"
+	case strings.HasPrefix(eventType, "system."):
+		return "System Event"
+	case strings.HasPrefix(eventType, "permission."):
+		return "Permission Event"
+	case strings.HasPrefix(eventType, "external_tool."):
+		return "External Tool Event"
+	case strings.HasPrefix(eventType, "user_input."):
+		return "User Input Event"
+	case strings.HasPrefix(eventType, "elicitation."):
+		return "Elicitation Event"
+	case strings.HasPrefix(eventType, "command."):
+		return "Command Event"
+	case strings.HasPrefix(eventType, "mcp."):
+		return "MCP Event"
+	case strings.HasPrefix(eventType, "hook."):
+		return "Hook Event"
+	case strings.HasPrefix(eventType, "exit_plan_mode."):
+		return "Plan Event"
+	case strings.HasPrefix(eventType, "user."):
+		return "User Event"
+	default:
+		return "Event"
+	}
+}
+
+func rawDataInlineText(rawData any) string {
+	return inlineScalarText(scalarString(rawData))
+}
+
+func bestEffortHistorySummary(ev *sessionEvent) string {
+	if summary := inlineScalarText(eventText(ev.Data)); summary != "" {
+		return summary
+	}
+	for _, candidate := range []string{
+		dataString(ev.Data, "message"),
+		dataString(ev.Data, "intent"),
+		dataString(ev.Data, "question"),
+		dataString(ev.Data, "summary"),
+		dataString(ev.Data, "summaryContent"),
+		nestedDataString(ev.Data, "arguments", "command"),
+		nestedDataString(ev.Data, "arguments", "description"),
+		nestedDataString(ev.Data, "error", "message"),
+		nestedDataString(ev.Data, "permissionRequest", "path"),
+		nestedDataString(ev.Data, "permissionRequest", "title"),
+	} {
+		if summary := inlineScalarText(candidate); summary != "" {
+			return summary
+		}
+	}
+	if transition := formatHistoryTransition(dataString(ev.Data, "previousMode"), dataString(ev.Data, "newMode")); transition != "" {
+		return transition
+	}
+	if transition := formatHistoryTransition(dataString(ev.Data, "previousModel"), dataString(ev.Data, "newModel")); transition != "" {
+		return transition
+	}
+	if path := dataString(ev.Data, "path"); path != "" {
+		if operation := dataScalarString(ev.Data, "operation"); operation != "" {
+			return fmt.Sprintf("%s: %s", operation, path)
+		}
+		return path
+	}
+	name := firstNonEmpty(
+		dataString(ev.Data, "toolName"),
+		dataString(ev.Data, "agentDisplayName"),
+		dataString(ev.Data, "agentName"),
+		dataString(ev.Data, "name"),
+		dataString(ev.Data, "skillName"),
+		dataString(ev.Data, "serverName"),
+		dataString(ev.Data, "selectedModel"),
+		dataString(ev.Data, "currentModel"),
+	)
+	if name != "" {
+		if status := dataScalarString(ev.Data, "status"); status != "" && !strings.EqualFold(name, status) {
+			return fmt.Sprintf("%s (%s)", name, status)
+		}
+		return name
+	}
+	if status := dataScalarString(ev.Data, "status"); status != "" {
+		return status
+	}
+	if summary := rawDataInlineText(ev.RawData); summary != "" {
+		return summary
+	}
+	if requestID := dataString(ev.Data, "requestId"); requestID != "" {
+		return "Request " + shortID(requestID)
+	}
+	if toolCallID := dataString(ev.Data, "toolCallId"); toolCallID != "" {
+		return "Tool Call " + shortID(toolCallID)
+	}
+	return ""
+}
+
+// Unknown future events should still render as meaningful rows instead of
+// disappearing just because Copilot CLI shipped a new type before copilot-sdk
+// (or this repository's explicit switch statements) learned about it.
+func describeUnknownHistoryEvent(ev *sessionEvent) (string, string, []string) {
+	label := historyEventFamilyLabel(ev.Type)
+	detail := ev.Type
+	if summary := bestEffortHistorySummary(ev); summary != "" {
+		detail = fmt.Sprintf("%s: %s", ev.Type, summary)
+	} else if ev.ID != "" {
+		detail = fmt.Sprintf("%s (%s)", ev.Type, ev.ID)
+	}
+
+	extraLines := make([]string, 0, 8)
+	seenExtraLines := make(map[string]struct{})
+	appendExtraLine := func(line string) {
+		if line == "" {
+			return
+		}
+		if _, ok := seenExtraLines[line]; ok {
+			return
+		}
+		seenExtraLines[line] = struct{}{}
+		extraLines = append(extraLines, line)
+	}
+
+	if ev.Ephemeral != nil && *ev.Ephemeral {
+		appendExtraLine("Ephemeral")
+	}
+	if requestID := dataString(ev.Data, "requestId"); requestID != "" {
+		appendExtraLine("Request ID: " + shortID(requestID))
+	}
+	if toolCallID := dataString(ev.Data, "toolCallId"); toolCallID != "" {
+		appendExtraLine("Tool Call ID: " + shortID(toolCallID))
+	}
+	if parentToolCallID := dataString(ev.Data, "parentToolCallId"); parentToolCallID != "" {
+		appendExtraLine("Parent Tool Call ID: " + shortID(parentToolCallID))
+	}
+	if interactionID := dataString(ev.Data, "interactionId"); interactionID != "" {
+		appendExtraLine("Interaction: " + shortID(interactionID))
+	}
+	if turnID := dataString(ev.Data, "turnId"); turnID != "" {
+		appendExtraLine("Turn ID: " + turnID)
+	}
+	if model := dataString(ev.Data, "model"); model != "" && !strings.Contains(detail, model) {
+		appendExtraLine("Model: " + model)
+	}
+	if status := dataScalarString(ev.Data, "status"); status != "" && !strings.Contains(detail, status) {
+		appendExtraLine("Status: " + status)
+	}
+	if path := dataString(ev.Data, "path"); path != "" && !strings.Contains(detail, path) {
+		appendExtraLine("Path: " + path)
+	}
+	if question := inlineScalarText(dataString(ev.Data, "question")); question != "" && !strings.Contains(detail, question) {
+		appendExtraLine("Question: " + question)
+	}
+	if message := inlineScalarText(dataString(ev.Data, "message")); message != "" && !strings.Contains(detail, message) {
+		appendExtraLine("Message: " + message)
+	}
+	if summary := inlineScalarText(dataString(ev.Data, "summary")); summary != "" && !strings.Contains(detail, summary) {
+		appendExtraLine("Summary: " + summary)
+	}
+	if summary := inlineScalarText(dataString(ev.Data, "summaryContent")); summary != "" && !strings.Contains(detail, summary) {
+		appendExtraLine("Summary: " + summary)
+	}
+
+	return label, detail, extraLines
+}
+
 func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, string, []string) {
 	switch ev.Type {
 	case "user.message":
@@ -2660,6 +3253,9 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 					continue
 				}
 				if reqs, ok := mv["requests"].(map[string]any); ok {
+					// count tracks assistant-output volume by model, while cost is the
+					// billed premium-request amount from shutdown. Nested subagent work
+					// can leave count > 0 even when the billed cost for that model is 0.
 					count, _ := reqs["count"].(float64)
 					cost, _ := reqs["cost"].(float64)
 					extraLines = append(extraLines, fmt.Sprintf("Model %s: Requests %.0f, Cost %.0f", model, count, cost))
@@ -2704,11 +3300,7 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 	case "abort":
 		return "Abort", "", nil
 	default:
-		detail := ev.Type
-		if ev.ID != "" {
-			detail = fmt.Sprintf("%s (%s)", ev.Type, ev.ID)
-		}
-		return "Event", detail, nil
+		return describeUnknownHistoryEvent(ev)
 	}
 }
 
@@ -2858,6 +3450,9 @@ func sortSessionInteractionHubs(hubs map[string]*interactionHubAccumulator) []se
 	return items
 }
 
+// Nested parents are grouped by parentToolCallId rather than parentId because
+// the tool-span lineage stays useful even when the event DAG is incomplete for
+// assistant.message rows and other nested control-plane activity.
 func sortSessionNestedToolParents(parents map[string]*nestedToolParentAccumulator) []sessionNestedToolParent {
 	items := make([]sessionNestedToolParent, 0, len(parents))
 	for parentToolCallID, parent := range parents {
@@ -2908,6 +3503,8 @@ func buildSessionGraphSummary(sessionID string, events []*sessionEvent) (*sessio
 			}
 		}
 
+		// toolCallId / parentToolCallId describe nested control-plane lineage and
+		// are intentionally tracked separately from parentId event edges.
 		toolCallID := dataString(ev.Data, "toolCallId")
 		if toolCallID == "" {
 			continue
@@ -3033,6 +3630,9 @@ func buildTurnWindows(events []*sessionEvent) []*sessionTurnWindow {
 			eventByID[ev.ID] = ev
 		}
 
+		// session.start/session.resume begin a new segment. turnId is only stable
+		// within a segment, so open turn queues reset here instead of assuming
+		// session-global turn numbering across resumes.
 		switch ev.Type {
 		case "session.start", "session.resume":
 			segmentNumber++

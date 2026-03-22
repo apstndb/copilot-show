@@ -19,6 +19,7 @@ type Sources struct {
 	ReleaseStatus       string `json:"releaseStatus" yaml:"releaseStatus"`
 	SupportedClients    string `json:"supportedClients" yaml:"supportedClients"`
 	SupportedPlans      string `json:"supportedPlans" yaml:"supportedPlans"`
+	ModelMultipliers    string `json:"modelMultipliers" yaml:"modelMultipliers"`
 	ModelComparison     string `json:"modelComparison" yaml:"modelComparison"`
 	DeprecationHistory  string `json:"deprecationHistory" yaml:"deprecationHistory"`
 	EmbeddedRepo        string `json:"embeddedRepo,omitempty" yaml:"embeddedRepo,omitempty"`
@@ -95,6 +96,17 @@ func (p PlanAvailability) SupportedPlanNames() []string {
 	return names
 }
 
+type RequestMultipliers struct {
+	Paid *float64 `json:"paid,omitempty" yaml:"paid,omitempty"`
+	Free *float64 `json:"free,omitempty" yaml:"free,omitempty"`
+}
+
+type ModeAvailability struct {
+	Agent bool `json:"agent" yaml:"agent"`
+	Ask   bool `json:"ask" yaml:"ask"`
+	Edit  bool `json:"edit" yaml:"edit"`
+}
+
 type Comparison struct {
 	TaskArea       string `json:"taskArea,omitempty" yaml:"taskArea,omitempty"`
 	ExcelsAt       string `json:"excelsAt,omitempty" yaml:"excelsAt,omitempty"`
@@ -108,11 +120,14 @@ type RetiredModel struct {
 }
 
 type DocsModel struct {
-	Name          string             `json:"name" yaml:"name"`
-	ReleaseStatus string             `json:"releaseStatus" yaml:"releaseStatus"`
-	Clients       ClientAvailability `json:"clients" yaml:"clients"`
-	Plans         PlanAvailability   `json:"plans" yaml:"plans"`
-	Comparison    *Comparison        `json:"comparison,omitempty" yaml:"comparison,omitempty"`
+	Name          string              `json:"name" yaml:"name"`
+	Provider      string              `json:"provider" yaml:"provider"`
+	ReleaseStatus string              `json:"releaseStatus" yaml:"releaseStatus"`
+	Modes         ModeAvailability    `json:"modes" yaml:"modes"`
+	Clients       ClientAvailability  `json:"clients" yaml:"clients"`
+	Plans         PlanAvailability    `json:"plans" yaml:"plans"`
+	Multipliers   *RequestMultipliers `json:"multipliers,omitempty" yaml:"multipliers,omitempty"`
+	Comparison    *Comparison         `json:"comparison,omitempty" yaml:"comparison,omitempty"`
 }
 
 type LiveMatch struct {
@@ -123,13 +138,16 @@ type LiveMatch struct {
 }
 
 type JoinedModel struct {
-	Name          string             `json:"name" yaml:"name"`
-	ReleaseStatus string             `json:"releaseStatus" yaml:"releaseStatus"`
-	Clients       ClientAvailability `json:"clients" yaml:"clients"`
-	Plans         PlanAvailability   `json:"plans" yaml:"plans"`
-	Comparison    *Comparison        `json:"comparison,omitempty" yaml:"comparison,omitempty"`
-	VisibleNow    bool               `json:"visibleNow" yaml:"visibleNow"`
-	LiveModels    []LiveMatch        `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
+	Name          string              `json:"name" yaml:"name"`
+	Provider      string              `json:"provider" yaml:"provider"`
+	ReleaseStatus string              `json:"releaseStatus" yaml:"releaseStatus"`
+	Modes         ModeAvailability    `json:"modes" yaml:"modes"`
+	Clients       ClientAvailability  `json:"clients" yaml:"clients"`
+	Plans         PlanAvailability    `json:"plans" yaml:"plans"`
+	Multipliers   *RequestMultipliers `json:"multipliers,omitempty" yaml:"multipliers,omitempty"`
+	Comparison    *Comparison         `json:"comparison,omitempty" yaml:"comparison,omitempty"`
+	VisibleNow    bool                `json:"visibleNow" yaml:"visibleNow"`
+	LiveModels    []LiveMatch         `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
 }
 
 type Snapshot struct {
@@ -202,9 +220,12 @@ func buildSnapshotFromCatalog(live []rpc.Model, catalog docsCatalog) Snapshot {
 		liveMatches := cloneLiveMatches(liveByKey[key])
 		joined = append(joined, JoinedModel{
 			Name:          model.Name,
+			Provider:      model.Provider,
 			ReleaseStatus: model.ReleaseStatus,
+			Modes:         model.Modes,
 			Clients:       model.Clients,
 			Plans:         model.Plans,
+			Multipliers:   cloneRequestMultipliers(model.Multipliers),
 			Comparison:    model.Comparison,
 			VisibleNow:    len(liveMatches) > 0,
 			LiveModels:    liveMatches,
@@ -316,5 +337,21 @@ func cloneStrings(values []string) []string {
 	}
 	cloned := make([]string, len(values))
 	copy(cloned, values)
+	return cloned
+}
+
+func cloneRequestMultipliers(multipliers *RequestMultipliers) *RequestMultipliers {
+	if multipliers == nil {
+		return nil
+	}
+	cloned := &RequestMultipliers{}
+	if multipliers.Paid != nil {
+		paid := *multipliers.Paid
+		cloned.Paid = &paid
+	}
+	if multipliers.Free != nil {
+		free := *multipliers.Free
+		cloned.Free = &free
+	}
 	return cloned
 }

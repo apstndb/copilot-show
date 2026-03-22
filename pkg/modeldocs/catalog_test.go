@@ -55,8 +55,10 @@ func TestBuildSnapshotMatchesPreviewNames(t *testing.T) {
 
 	var geminiPro JoinedModel
 	var gemini31 JoinedModel
+	var gpt41 JoinedModel
 	foundGeminiPro := false
 	foundGemini31 := false
+	foundGPT41 := false
 	for _, model := range snapshot.Models {
 		switch model.Name {
 		case "Gemini 3 Pro":
@@ -65,6 +67,9 @@ func TestBuildSnapshotMatchesPreviewNames(t *testing.T) {
 		case "Gemini 3.1 Pro":
 			gemini31 = model
 			foundGemini31 = true
+		case "GPT-4.1":
+			gpt41 = model
+			foundGPT41 = true
 		}
 	}
 
@@ -74,15 +79,36 @@ func TestBuildSnapshotMatchesPreviewNames(t *testing.T) {
 	if !geminiPro.VisibleNow {
 		t.Fatalf("Gemini 3 Pro should be matched as visible")
 	}
+	if geminiPro.Provider != "Google" {
+		t.Fatalf("Gemini 3 Pro provider = %q, want %q", geminiPro.Provider, "Google")
+	}
+	if !geminiPro.Modes.Agent || !geminiPro.Modes.Ask || !geminiPro.Modes.Edit {
+		t.Fatalf("Gemini 3 Pro modes = %#v, want all true", geminiPro.Modes)
+	}
 	if len(geminiPro.LiveModels) != 1 || geminiPro.LiveModels[0].ID != "gemini-3-pro-preview" {
 		t.Fatalf("Gemini 3 Pro live matches = %#v, want gemini-3-pro-preview", geminiPro.LiveModels)
+	}
+	if geminiPro.Multipliers == nil || geminiPro.Multipliers.Paid == nil || *geminiPro.Multipliers.Paid != 1 {
+		t.Fatalf("Gemini 3 Pro multipliers = %#v, want paid=1", geminiPro.Multipliers)
 	}
 
 	if !foundGemini31 {
 		t.Fatalf("Gemini 3.1 Pro docs row not found")
 	}
+	if gemini31.Provider != "Google" {
+		t.Fatalf("Gemini 3.1 Pro provider = %q, want %q", gemini31.Provider, "Google")
+	}
 	if gemini31.VisibleNow {
 		t.Fatalf("Gemini 3.1 Pro should remain not visible in this fixture")
+	}
+	if gemini31.Multipliers == nil || gemini31.Multipliers.Paid == nil || *gemini31.Multipliers.Paid != 1 {
+		t.Fatalf("Gemini 3.1 Pro multipliers = %#v, want paid=1", gemini31.Multipliers)
+	}
+	if !foundGPT41 {
+		t.Fatalf("GPT-4.1 docs row not found")
+	}
+	if gpt41.Multipliers == nil || gpt41.Multipliers.Paid == nil || *gpt41.Multipliers.Paid != 0 || gpt41.Multipliers.Free == nil || *gpt41.Multipliers.Free != 1 {
+		t.Fatalf("GPT-4.1 multipliers = %#v, want paid=0 and free=1", gpt41.Multipliers)
 	}
 
 	if snapshot.LoadedFrom != string(loadModeEmbedded) {
@@ -105,6 +131,8 @@ func TestBuildSnapshotWithLatestFallback(t *testing.T) {
 			return []byte("[]\n"), nil
 		case strings.HasSuffix(url, "/model-supported-plans.yml"):
 			return []byte("- name: Gemini 3 Pro\n  free: false\n  student: true\n  pro: true\n  pro_plus: true\n  business: true\n  enterprise: true\n"), nil
+		case strings.HasSuffix(url, "/model-multipliers.yml"):
+			return []byte("- name: Gemini 3 Pro\n  multiplier_paid: 1\n  multiplier_free: Not applicable\n"), nil
 		case strings.HasSuffix(url, "/model-comparison.yml"):
 			return []byte("[]\n"), nil
 		case strings.HasSuffix(url, "/model-deprecation-history.yml"):

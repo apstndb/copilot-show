@@ -3,6 +3,10 @@
 `copilot-show` is a command-line tool to inspect various information from the GitHub Copilot CLI, such as quotas, models, and tools.
 It is built on top of [github.com/github/copilot-sdk/go](https://github.com/github/copilot-sdk).
 
+## Documentation
+
+- `docs/research/README.md`: curated research notes on premium-request billing, session event-model caveats, and API pricing overrides.
+
 ## Installation
 
 Install via `go install` (ensure your `GOPATH/bin` is in `PATH`):
@@ -23,7 +27,8 @@ Run the tool with a subcommand to inspect specific resources.
 
 Available subcommands:
 - `quota`: Show Copilot Premium Interactions usage and entitlement.
-- `models`: Show available models and their multipliers.
+- `models`: Show available models with live runtime details and docs-backed multipliers.
+- `model-docs`: Show CLI-focused model metadata from `github/docs`, with `--all` for broader docs-backed fields.
 - `tools`: Show available tools.
 - `usage`: Show billing usage report from GitHub API, with model multipliers and entitlement joined from the models list and quota snapshots.
 - `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
@@ -68,10 +73,27 @@ Month Progress (UTC): 38.8%
 
 ### List Models
 
-Lists available AI models with details like context size and billing multipliers.
+Lists available AI models with live runtime details such as token limits and reasoning support, while preferring the docs-backed paid multiplier table from `github/docs` for the multiplier column.
 
 ```bash
 copilot-show models
+```
+
+### Model Docs
+
+Shows the docs-backed model matrix from `github/docs`, joined with the live CLI model list.
+By default it shows the docs-backed models that support Copilot CLI, including `Visible Now` and `Supported Plans` so you can compare what your account sees now with what other plans may expose.
+Use `--all` when you also want docs rows that do not support Copilot CLI, retired-model history, broader metadata such as Agent/Ask/Edit modes and task areas, and the full multi-client YAML surface.
+`Multiplier` prefers the docs-backed paid multiplier table and only falls back to live runtime billing when the docs snapshot has no multiplier for a visible row.
+
+```bash
+copilot-show model-docs
+
+# Try the latest github/docs tables first
+copilot-show model-docs --latest
+
+# Include broader docs-backed metadata
+copilot-show model-docs --all
 ```
 
 ### List Tools
@@ -167,7 +189,6 @@ copilot-show quota -f yaml
 The following commands are hidden by default but can be executed by specifying their names:
 
 - `agents`: List available Copilot agents
-- `model-docs`: Show an embedded docs snapshot of model release/client/plan metadata, compared with the live CLI model list (`--latest` tries fresh github/docs data first)
 - `skills`: List available skills (name, source, enabled, path, description)
 - `extensions`: List available extensions (id, status, source, pid)
 - `plugins`: List installed plugins (name, marketplace, version)
