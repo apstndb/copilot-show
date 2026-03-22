@@ -1,11 +1,15 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/apstndb/copilot-show/pkg/modeldocs"
+	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
 )
 
@@ -457,5 +461,87 @@ func TestDescribeHistoryEventUsesScalarRawPayloadForFutureEvents(t *testing.T) {
 	}
 	if len(extraLines) != 0 {
 		t.Fatalf("describeHistoryEvent() extraLines = %#v, want none", extraLines)
+	}
+}
+
+func TestIsKnownSDKSessionEventType(t *testing.T) {
+	t.Parallel()
+
+	if !isKnownSDKSessionEventType(copilot.SessionEventTypeUserMessage) {
+		t.Fatal("isKnownSDKSessionEventType(user.message) = false, want true")
+	}
+	if isKnownSDKSessionEventType(copilot.SessionEventType("session.future_notice")) {
+		t.Fatal("isKnownSDKSessionEventType(session.future_notice) = true, want false")
+	}
+}
+
+func TestValidateSessionEventsAtPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	rows := []string{
+		`{"id":"evt-1","type":"user.message","timestamp":"2026-03-22T14:32:57Z","data":{"content":"hello"}}`,
+		`{"id":"evt-2","type":"session.future_notice","timestamp":"2026-03-22T14:32:58Z","data":{"message":"future but object"}}`,
+		`{"id":"evt-3","type":"session.future_notice","timestamp":1711111111000,"data":"future scalar"}`,
+		`{"id":"evt-4","type":"session.start","timestamp":1711111111000,"data":{"sessionId":"session-1"}}`,
+	}
+	if err := os.WriteFile(eventsPath, []byte(strings.Join(rows, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", eventsPath, err)
+	}
+
+	summary, err := validateSessionEventsAtPath("session-1", eventsPath, 10)
+	if err != nil {
+		t.Fatalf("validateSessionEventsAtPath() error = %v", err)
+	}
+
+	if summary.TotalRows != 4 {
+		t.Fatalf("TotalRows = %d, want 4", summary.TotalRows)
+	}
+	if summary.SDKKnownTypeRows != 2 || summary.SDKUnknownTypeRows != 2 {
+		t.Fatalf("known/unknown rows = %d/%d, want 2/2", summary.SDKKnownTypeRows, summary.SDKUnknownTypeRows)
+	}
+	if summary.SDKCompatibleRows != 2 || summary.SDKIncompatibleRows != 2 {
+		t.Fatalf("sdk compatible/incompatible rows = %d/%d, want 2/2", summary.SDKCompatibleRows, summary.SDKIncompatibleRows)
+	}
+	if summary.LocalCompatibleRows != 4 || summary.LocalIncompatibleRows != 0 {
+		t.Fatalf("local compatible/incompatible rows = %d/%d, want 4/0", summary.LocalCompatibleRows, summary.LocalIncompatibleRows)
+	}
+	if summary.LocalOnlyFallbackRows != 2 {
+		t.Fatalf("LocalOnlyFallbackRows = %d, want 2", summary.LocalOnlyFallbackRows)
+	}
+	if summary.UnknownTypeSDKCompatibleRows != 1 {
+		t.Fatalf("UnknownTypeSDKCompatibleRows = %d, want 1", summary.UnknownTypeSDKCompatibleRows)
+	}
+	if len(summary.IssueCounts) != 3 {
+		t.Fatalf("IssueCounts len = %d, want 3 (%#v)", len(summary.IssueCounts), summary.IssueCounts)
+	}
+	if len(summary.Samples) != 3 {
+		t.Fatalf("Samples len = %d, want 3 (%#v)", len(summary.Samples), summary.Samples)
+	}
+
+	wantIssues := map[string]int{
+		"known-type-local-only-fallback":   1,
+		"unknown-type-local-only-fallback": 1,
+		"unknown-type-sdk-compatible":      1,
+	}
+	for _, issue := range summary.IssueCounts {
+		if wantIssues[issue.Issue] != issue.Rows {
+			t.Fatalf("IssueCounts contains %q=%d, want %#v", issue.Issue, issue.Rows, wantIssues)
+		}
+		delete(wantIssues, issue.Issue)
+	}
+	if len(wantIssues) != 0 {
+		t.Fatalf("IssueCounts missing issues: %#v", wantIssues)
+	}
+
+	if summary.Samples[0].Issue != "unknown-type-sdk-compatible" || !summary.Samples[0].SDKCompatible || !summary.Samples[0].LocalCompatible {
+		t.Fatalf("Samples[0] = %#v, want unknown-type-sdk-compatible sample", summary.Samples[0])
+	}
+	if summary.Samples[1].Issue != "unknown-type-local-only-fallback" || summary.Samples[1].TimestampKind != "number" || summary.Samples[1].DataKind != "string" {
+		t.Fatalf("Samples[1] = %#v, want numeric timestamp scalar fallback sample", summary.Samples[1])
+	}
+	if summary.Samples[2].Issue != "known-type-local-only-fallback" || !summary.Samples[2].SDKKnownType {
+		t.Fatalf("Samples[2] = %#v, want known-type local fallback sample", summary.Samples[2])
 	}
 }

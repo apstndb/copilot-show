@@ -152,6 +152,7 @@ func main() {
 		newSessionsCmd(client),
 		newHistoryCmd(client),
 		newGraphCmd(client),
+		newValidateEventsCmd(client),
 	}
 	for _, c := range hiddenCmds {
 		c.Hidden = true
@@ -1578,6 +1579,29 @@ func newGraphCmd(client *copilot.Client) *cobra.Command {
 	}
 }
 
+func newValidateEventsCmd(client *copilot.Client) *cobra.Command {
+	var sampleLimit int
+	cmd := &cobra.Command{
+		Use:   "validate-events [sessionID]",
+		Short: "Validate local session events against copilot-sdk generated types",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			if sampleLimit < 0 {
+				log.Printf("invalid --samples %d: expected >= 0", sampleLimit)
+				return
+			}
+			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			if err != nil {
+				log.Printf("%v", err)
+				return
+			}
+			showValidateEvents(cmd.Context(), client, sessionID, outputFormat, sampleLimit)
+		},
+	}
+	cmd.Flags().IntVar(&sampleLimit, "samples", 20, "Maximum non-OK validation samples to include")
+	return cmd
+}
+
 func newUsageCmd(client *copilot.Client) *cobra.Command {
 	var year, month, day, last int
 	var product, model, sortOrder string
@@ -1987,6 +2011,11 @@ func rawSessionEventType(raw map[string]any) copilot.SessionEventType {
 	return copilot.SessionEventType(value)
 }
 
+func isKnownSDKSessionEventType(eventType copilot.SessionEventType) bool {
+	_, ok := knownSDKSessionEventTypes[eventType]
+	return ok
+}
+
 type sessionTurnWindow struct {
 	TurnNumber        int            `json:"turnNumber" yaml:"turnNumber"`
 	SegmentNumber     int            `json:"segmentNumber" yaml:"segmentNumber"`
@@ -2113,6 +2142,116 @@ type sessionNamedCount struct {
 	Count int    `json:"count" yaml:"count"`
 }
 
+type sessionEventValidationIssueCount struct {
+	Issue string `json:"issue" yaml:"issue"`
+	Rows  int    `json:"rows" yaml:"rows"`
+}
+
+type sessionEventValidationSample struct {
+	Row             int    `json:"row" yaml:"row"`
+	ID              string `json:"id,omitempty" yaml:"id,omitempty"`
+	Type            string `json:"type" yaml:"type"`
+	SDKKnownType    bool   `json:"sdkKnownType" yaml:"sdkKnownType"`
+	SDKCompatible   bool   `json:"sdkCompatible" yaml:"sdkCompatible"`
+	LocalCompatible bool   `json:"localCompatible" yaml:"localCompatible"`
+	Issue           string `json:"issue" yaml:"issue"`
+	TimestampKind   string `json:"timestampKind,omitempty" yaml:"timestampKind,omitempty"`
+	TimestampValue  string `json:"timestampValue,omitempty" yaml:"timestampValue,omitempty"`
+	DataKind        string `json:"dataKind,omitempty" yaml:"dataKind,omitempty"`
+	SDKError        string `json:"sdkError,omitempty" yaml:"sdkError,omitempty"`
+}
+
+type sessionEventValidationSummary struct {
+	SessionID                    string                             `json:"sessionId" yaml:"sessionId"`
+	EventsPath                   string                             `json:"eventsPath" yaml:"eventsPath"`
+	SampleLimit                  int                                `json:"sampleLimit" yaml:"sampleLimit"`
+	TotalRows                    int                                `json:"totalRows" yaml:"totalRows"`
+	SDKKnownTypeRows             int                                `json:"sdkKnownTypeRows" yaml:"sdkKnownTypeRows"`
+	SDKUnknownTypeRows           int                                `json:"sdkUnknownTypeRows" yaml:"sdkUnknownTypeRows"`
+	SDKCompatibleRows            int                                `json:"sdkCompatibleRows" yaml:"sdkCompatibleRows"`
+	SDKIncompatibleRows          int                                `json:"sdkIncompatibleRows" yaml:"sdkIncompatibleRows"`
+	LocalCompatibleRows          int                                `json:"localCompatibleRows" yaml:"localCompatibleRows"`
+	LocalIncompatibleRows        int                                `json:"localIncompatibleRows" yaml:"localIncompatibleRows"`
+	LocalOnlyFallbackRows        int                                `json:"localOnlyFallbackRows" yaml:"localOnlyFallbackRows"`
+	UnknownTypeSDKCompatibleRows int                                `json:"unknownTypeSdkCompatibleRows" yaml:"unknownTypeSdkCompatibleRows"`
+	IssueCounts                  []sessionEventValidationIssueCount `json:"issueCounts,omitempty" yaml:"issueCounts,omitempty"`
+	Samples                      []sessionEventValidationSample     `json:"samples,omitempty" yaml:"samples,omitempty"`
+}
+
+// Mirrors the generated SessionEventType constants so validator output can tell
+// whether a row uses a type known to the current copilot-sdk build.
+var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
+	copilot.SessionEventTypeAbort:                         {},
+	copilot.SessionEventTypeAssistantIntent:               {},
+	copilot.SessionEventTypeAssistantMessage:              {},
+	copilot.SessionEventTypeAssistantMessageDelta:         {},
+	copilot.SessionEventTypeAssistantReasoning:            {},
+	copilot.SessionEventTypeAssistantReasoningDelta:       {},
+	copilot.SessionEventTypeAssistantStreamingDelta:       {},
+	copilot.SessionEventTypeAssistantTurnEnd:              {},
+	copilot.SessionEventTypeAssistantTurnStart:            {},
+	copilot.SessionEventTypeAssistantUsage:                {},
+	copilot.SessionEventTypeCommandCompleted:              {},
+	copilot.SessionEventTypeCommandExecute:                {},
+	copilot.SessionEventTypeCommandQueued:                 {},
+	copilot.SessionEventTypeCommandsChanged:               {},
+	copilot.SessionEventTypeElicitationCompleted:          {},
+	copilot.SessionEventTypeElicitationRequested:          {},
+	copilot.SessionEventTypeExitPlanModeCompleted:         {},
+	copilot.SessionEventTypeExitPlanModeRequested:         {},
+	copilot.SessionEventTypeExternalToolCompleted:         {},
+	copilot.SessionEventTypeExternalToolRequested:         {},
+	copilot.SessionEventTypeHookEnd:                       {},
+	copilot.SessionEventTypeHookStart:                     {},
+	copilot.SessionEventTypeMcpOauthCompleted:             {},
+	copilot.SessionEventTypeMcpOauthRequired:              {},
+	copilot.SessionEventTypePendingMessagesModified:       {},
+	copilot.SessionEventTypePermissionCompleted:           {},
+	copilot.SessionEventTypePermissionRequested:           {},
+	copilot.SessionEventTypeSessionBackgroundTasksChanged: {},
+	copilot.SessionEventTypeSessionCompactionComplete:     {},
+	copilot.SessionEventTypeSessionCompactionStart:        {},
+	copilot.SessionEventTypeSessionContextChanged:         {},
+	copilot.SessionEventTypeSessionError:                  {},
+	copilot.SessionEventTypeSessionExtensionsLoaded:       {},
+	copilot.SessionEventTypeSessionHandoff:                {},
+	copilot.SessionEventTypeSessionIdle:                   {},
+	copilot.SessionEventTypeSessionInfo:                   {},
+	copilot.SessionEventTypeSessionMcpServerStatusChanged: {},
+	copilot.SessionEventTypeSessionMcpServersLoaded:       {},
+	copilot.SessionEventTypeSessionModeChanged:            {},
+	copilot.SessionEventTypeSessionModelChange:            {},
+	copilot.SessionEventTypeSessionPlanChanged:            {},
+	copilot.SessionEventTypeSessionResume:                 {},
+	copilot.SessionEventTypeSessionShutdown:               {},
+	copilot.SessionEventTypeSessionSkillsLoaded:           {},
+	copilot.SessionEventTypeSessionSnapshotRewind:         {},
+	copilot.SessionEventTypeSessionStart:                  {},
+	copilot.SessionEventTypeSessionTaskComplete:           {},
+	copilot.SessionEventTypeSessionTitleChanged:           {},
+	copilot.SessionEventTypeSessionToolsUpdated:           {},
+	copilot.SessionEventTypeSessionTruncation:             {},
+	copilot.SessionEventTypeSessionUsageInfo:              {},
+	copilot.SessionEventTypeSessionWarning:                {},
+	copilot.SessionEventTypeSessionWorkspaceFileChanged:   {},
+	copilot.SessionEventTypeSkillInvoked:                  {},
+	copilot.SessionEventTypeSubagentCompleted:             {},
+	copilot.SessionEventTypeSubagentDeselected:            {},
+	copilot.SessionEventTypeSubagentFailed:                {},
+	copilot.SessionEventTypeSubagentSelected:              {},
+	copilot.SessionEventTypeSubagentStarted:               {},
+	copilot.SessionEventTypeSystemMessage:                 {},
+	copilot.SessionEventTypeSystemNotification:            {},
+	copilot.SessionEventTypeToolExecutionComplete:         {},
+	copilot.SessionEventTypeToolExecutionPartialResult:    {},
+	copilot.SessionEventTypeToolExecutionProgress:         {},
+	copilot.SessionEventTypeToolExecutionStart:            {},
+	copilot.SessionEventTypeToolUserRequested:             {},
+	copilot.SessionEventTypeUserInputCompleted:            {},
+	copilot.SessionEventTypeUserInputRequested:            {},
+	copilot.SessionEventTypeUserMessage:                   {},
+}
+
 type interactionHubAccumulator struct {
 	matchedEvents int
 	toolCalls     map[string]struct{}
@@ -2176,33 +2315,53 @@ func sessionEventsPath(sessionID string) string {
 
 var errStopJSONLIteration = errors.New("stop jsonl iteration")
 
-func visitJSONLObjects(path string, fn func(map[string]any) error) error {
+func visitJSONLRows(path string, fn func(rowNo int, line []byte, raw map[string]any) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("error opening events file: %w", err)
 	}
 	defer f.Close()
 
-	decoder := json.NewDecoder(bufio.NewReader(f))
+	reader := bufio.NewReader(f)
 	rowNo := 0
 	for {
 		var ev map[string]any
-		if err := decoder.Decode(&ev); err != nil {
-			if errors.Is(err, io.EOF) {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("error reading %s row %d: %w", path, rowNo+1, readErr)
+		}
+		if len(line) == 0 && errors.Is(readErr, io.EOF) {
+			break
+		}
+		trimmed := strings.TrimSpace(string(line))
+		if trimmed == "" {
+			if errors.Is(readErr, io.EOF) {
 				break
 			}
+			continue
+		}
+		if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
 			return fmt.Errorf("error decoding %s row %d: %w", path, rowNo+1, err)
 		}
 		rowNo++
-		if err := fn(ev); err != nil {
+		if err := fn(rowNo, []byte(trimmed), ev); err != nil {
 			if errors.Is(err, errStopJSONLIteration) {
 				return nil
 			}
 			return err
 		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
 	}
 
 	return nil
+}
+
+func visitJSONLObjects(path string, fn func(map[string]any) error) error {
+	return visitJSONLRows(path, func(_ int, _ []byte, raw map[string]any) error {
+		return fn(raw)
+	})
 }
 
 func sessionHasShutdown(eventsPath string) (bool, error) {
@@ -2385,6 +2544,150 @@ func loadSessionEvents(sessionID string) ([]*sessionEvent, error) {
 	}
 
 	return events, nil
+}
+
+func jsonValueKind(value any) string {
+	switch value.(type) {
+	case nil:
+		return "null"
+	case map[string]any:
+		return "object"
+	case []any:
+		return "array"
+	case string:
+		return "string"
+	case bool:
+		return "bool"
+	case float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, json.Number:
+		return "number"
+	default:
+		return fmt.Sprintf("%T", value)
+	}
+}
+
+func sessionEventValidationIssue(knownType bool, sdkCompatible bool, localCompatible bool) string {
+	switch {
+	case sdkCompatible && localCompatible && knownType:
+		return ""
+	case sdkCompatible && localCompatible:
+		return "unknown-type-sdk-compatible"
+	case sdkCompatible && !localCompatible && knownType:
+		return "known-type-local-parser-dropped"
+	case sdkCompatible && !localCompatible:
+		return "unknown-type-local-parser-dropped"
+	case !sdkCompatible && localCompatible && knownType:
+		return "known-type-local-only-fallback"
+	case !sdkCompatible && localCompatible:
+		return "unknown-type-local-only-fallback"
+	case knownType:
+		return "known-type-dropped"
+	default:
+		return "unknown-type-dropped"
+	}
+}
+
+func validateSessionEvents(sessionID string, sampleLimit int) (*sessionEventValidationSummary, error) {
+	eventsPath := sessionEventsPath(sessionID)
+	if _, err := os.Stat(eventsPath); err != nil {
+		return nil, fmt.Errorf("no local events found for session %s", sessionID)
+	}
+	return validateSessionEventsAtPath(sessionID, eventsPath, sampleLimit)
+}
+
+func validateSessionEventsAtPath(sessionID string, eventsPath string, sampleLimit int) (*sessionEventValidationSummary, error) {
+	if sampleLimit < 0 {
+		sampleLimit = 0
+	}
+
+	summary := &sessionEventValidationSummary{
+		SessionID:   sessionID,
+		EventsPath:  eventsPath,
+		SampleLimit: sampleLimit,
+	}
+	issueCounts := make(map[string]int)
+
+	if err := visitJSONLRows(eventsPath, func(rowNo int, line []byte, raw map[string]any) error {
+		summary.TotalRows++
+
+		eventType := rawSessionEventType(raw)
+		knownType := isKnownSDKSessionEventType(eventType)
+		if knownType {
+			summary.SDKKnownTypeRows++
+		} else {
+			summary.SDKUnknownTypeRows++
+		}
+
+		sdkCompatible := true
+		sdkError := ""
+		if _, err := copilot.UnmarshalSessionEvent(line); err != nil {
+			sdkCompatible = false
+			sdkError = err.Error()
+			summary.SDKIncompatibleRows++
+		} else {
+			summary.SDKCompatibleRows++
+		}
+
+		localCompatible := parseSessionEvent(raw) != nil
+		if localCompatible {
+			summary.LocalCompatibleRows++
+		} else {
+			summary.LocalIncompatibleRows++
+		}
+		if localCompatible && !sdkCompatible {
+			summary.LocalOnlyFallbackRows++
+		}
+		if !knownType && sdkCompatible {
+			summary.UnknownTypeSDKCompatibleRows++
+		}
+
+		issue := sessionEventValidationIssue(knownType, sdkCompatible, localCompatible)
+		if issue == "" {
+			return nil
+		}
+		issueCounts[issue]++
+		if sampleLimit == 0 || len(summary.Samples) >= sampleLimit {
+			return nil
+		}
+
+		id, _ := raw["id"].(string)
+		timestampValue := scalarString(raw["timestamp"])
+		if timestampValue != "" {
+			timestampValue = truncateRunes(normalizeInlineText(timestampValue), 48)
+		}
+		summary.Samples = append(summary.Samples, sessionEventValidationSample{
+			Row:             rowNo,
+			ID:              id,
+			Type:            string(eventType),
+			SDKKnownType:    knownType,
+			SDKCompatible:   sdkCompatible,
+			LocalCompatible: localCompatible,
+			Issue:           issue,
+			TimestampKind:   jsonValueKind(raw["timestamp"]),
+			TimestampValue:  timestampValue,
+			DataKind:        jsonValueKind(raw["data"]),
+			SDKError:        truncateRunes(normalizeInlineText(sdkError), 160),
+		})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if len(issueCounts) > 0 {
+		issues := make([]string, 0, len(issueCounts))
+		for issue := range issueCounts {
+			issues = append(issues, issue)
+		}
+		sort.Strings(issues)
+		summary.IssueCounts = make([]sessionEventValidationIssueCount, 0, len(issues))
+		for _, issue := range issues {
+			summary.IssueCounts = append(summary.IssueCounts, sessionEventValidationIssueCount{
+				Issue: issue,
+				Rows:  issueCounts[issue],
+			})
+		}
+	}
+
+	return summary, nil
 }
 
 func dataString(data map[string]any, key string) string {
@@ -4025,6 +4328,85 @@ func showGraph(ctx context.Context, client *copilot.Client, sessionID string, fo
 	fmt.Println("- parentId and parentToolCallId describe different relationships; both are shown separately.")
 	fmt.Println("- Interaction hubs count only direct interactionId edges from the event payload.")
 	fmt.Println("- Nested tool parents are resolved from parentToolCallId when the parent tool call also exists in the same local log.")
+}
+
+func showValidateEvents(ctx context.Context, client *copilot.Client, sessionID string, format string, sampleLimit int) {
+	_ = ctx
+	_ = client
+
+	summary, err := validateSessionEvents(sessionID, sampleLimit)
+	if err != nil {
+		log.Printf("%v", err)
+		return
+	}
+
+	if format == "yaml" {
+		printYAML(summary)
+		return
+	}
+
+	fmt.Printf("--- Session Event Validation for Session: %s ---\n", sessionID)
+	summaryTable := render.CreateTable([]string{"Metric", "Value"}, []int{1}, false, false, tableMode)
+	summaryTable.Append([]string{"Events path", summary.EventsPath})
+	summaryTable.Append([]string{"Total rows", strconv.Itoa(summary.TotalRows)})
+	summaryTable.Append([]string{"SDK-known type rows", strconv.Itoa(summary.SDKKnownTypeRows)})
+	summaryTable.Append([]string{"SDK-unknown type rows", strconv.Itoa(summary.SDKUnknownTypeRows)})
+	summaryTable.Append([]string{"SDK-compatible rows", strconv.Itoa(summary.SDKCompatibleRows)})
+	summaryTable.Append([]string{"SDK-incompatible rows", strconv.Itoa(summary.SDKIncompatibleRows)})
+	summaryTable.Append([]string{"Local-compatible rows", strconv.Itoa(summary.LocalCompatibleRows)})
+	summaryTable.Append([]string{"Local-incompatible rows", strconv.Itoa(summary.LocalIncompatibleRows)})
+	summaryTable.Append([]string{"Local-only fallback rows", strconv.Itoa(summary.LocalOnlyFallbackRows)})
+	summaryTable.Append([]string{"Unknown type but SDK-compatible rows", strconv.Itoa(summary.UnknownTypeSDKCompatibleRows)})
+	summaryTable.Render()
+
+	if len(summary.IssueCounts) > 0 {
+		fmt.Println("\nIssue Counts:")
+		issueTable := render.CreateTable([]string{"Issue", "Rows"}, []int{1}, false, false, tableMode)
+		for _, issue := range summary.IssueCounts {
+			issueTable.Append([]string{issue.Issue, strconv.Itoa(issue.Rows)})
+		}
+		issueTable.Render()
+	}
+
+	if len(summary.Samples) > 0 {
+		fmt.Println("\nSamples:")
+		sampleTable := render.CreateTable([]string{"Row", "Type", "ID", "Issue", "SDK Known", "SDK", "Local", "Timestamp", "Data", "Error"}, []int{1, 3, 9}, false, false, tableMode)
+		for _, sample := range summary.Samples {
+			id := "-"
+			if sample.ID != "" {
+				id = shortID(sample.ID)
+			}
+			timestamp := sample.TimestampKind
+			if sample.TimestampValue != "" {
+				timestamp = fmt.Sprintf("%s (%s)", sample.TimestampKind, sample.TimestampValue)
+			}
+			sdkError := sample.SDKError
+			if sdkError == "" {
+				sdkError = "-"
+			}
+			sampleTable.Append([]string{
+				strconv.Itoa(sample.Row),
+				sample.Type,
+				id,
+				sample.Issue,
+				strconv.FormatBool(sample.SDKKnownType),
+				strconv.FormatBool(sample.SDKCompatible),
+				strconv.FormatBool(sample.LocalCompatible),
+				timestamp,
+				sample.DataKind,
+				sdkError,
+			})
+		}
+		sampleTable.Render()
+		if summary.SampleLimit > 0 && len(summary.Samples) >= summary.SampleLimit {
+			fmt.Printf("Showing first %d non-OK rows.\n", summary.SampleLimit)
+		}
+	}
+
+	fmt.Println("\nNotes:")
+	fmt.Println("- 'SDK known' is based on the current generated copilot.SessionEventType constants.")
+	fmt.Println("- 'SDK compatible' means copilot.UnmarshalSessionEvent accepted the original JSONL row as-is.")
+	fmt.Println("- 'Local compatible' means copilot-show's schema-light parser would still retain the event.")
 }
 
 func showTurnsV2(sessionID string, format string) {
