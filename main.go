@@ -29,6 +29,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/ts"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 const (
@@ -94,6 +95,86 @@ func buildSettingValue(info *debug.BuildInfo, key string) string {
 	return ""
 }
 
+type hiddenCommandState struct {
+	command *cobra.Command
+	hidden  bool
+}
+
+type hiddenFlagState struct {
+	flag   *pflag.Flag
+	hidden bool
+}
+
+func withVisibleHiddenHelp(cmd *cobra.Command, enabled bool, fn func()) {
+	if !enabled || cmd == nil {
+		fn()
+		return
+	}
+
+	root := cmd.Root()
+	var commandStates []hiddenCommandState
+	var flagStates []hiddenFlagState
+	seenFlags := make(map[*pflag.Flag]struct{})
+	collectFlagState := func(set *pflag.FlagSet) {
+		if set == nil {
+			return
+		}
+		set.VisitAll(func(flag *pflag.Flag) {
+			if flag == nil {
+				return
+			}
+			if _, ok := seenFlags[flag]; ok {
+				return
+			}
+			seenFlags[flag] = struct{}{}
+			flagStates = append(flagStates, hiddenFlagState{flag: flag, hidden: flag.Hidden})
+			flag.Hidden = false
+		})
+	}
+
+	var walk func(*cobra.Command)
+	walk = func(current *cobra.Command) {
+		commandStates = append(commandStates, hiddenCommandState{command: current, hidden: current.Hidden})
+		current.Hidden = false
+		collectFlagState(current.PersistentFlags())
+		collectFlagState(current.Flags())
+		collectFlagState(current.LocalFlags())
+		collectFlagState(current.InheritedFlags())
+		collectFlagState(current.NonInheritedFlags())
+		for _, child := range current.Commands() {
+			walk(child)
+		}
+	}
+	walk(root)
+
+	defer func() {
+		for i := len(flagStates) - 1; i >= 0; i-- {
+			flagStates[i].flag.Hidden = flagStates[i].hidden
+		}
+		for i := len(commandStates) - 1; i >= 0; i-- {
+			commandStates[i].command.Hidden = commandStates[i].hidden
+		}
+	}()
+
+	fn()
+}
+
+func configureShowHiddenHelp(root *cobra.Command, showHidden *bool) {
+	defaultHelpFunc := root.HelpFunc()
+	var wrap func(*cobra.Command)
+	wrap = func(cmd *cobra.Command) {
+		cmd.SetHelpFunc(func(current *cobra.Command, args []string) {
+			withVisibleHiddenHelp(current, showHidden != nil && *showHidden, func() {
+				defaultHelpFunc(current, args)
+			})
+		})
+		for _, child := range cmd.Commands() {
+			wrap(child)
+		}
+	}
+	wrap(root)
+}
+
 func main() {
 	// 1. Initialize Copilot CLI client
 	client := copilot.NewClient(nil)
@@ -103,6 +184,7 @@ func main() {
 	}
 	defer client.Stop()
 
+	var showHiddenHelp bool
 	rootCmd := &cobra.Command{
 		Use:     "copilot-show",
 		Short:   "A tool to inspect GitHub Copilot information",
@@ -122,6 +204,7 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVarP(&outputFormat, "format", "f", "table", "Output format (table, yaml)")
 	rootCmd.PersistentFlags().StringVar(&tableMode, "table-mode", "default", "Table mode (default, ascii, markdown)")
+	rootCmd.PersistentFlags().BoolVar(&showHiddenHelp, "show-hidden", false, "Include hidden commands and hidden flags in help output")
 	rootCmd.PersistentFlags().StringVar(&uiVersion, "ui-version", uiVersionNew, "Hidden UI selector for temporary A/B testing (old, new)")
 	if err := rootCmd.PersistentFlags().MarkHidden("ui-version"); err != nil {
 		log.Fatalf("Failed to hide ui-version flag: %v", err)
@@ -158,6 +241,7 @@ func main() {
 		c.Hidden = true
 		rootCmd.AddCommand(c)
 	}
+	configureShowHiddenHelp(rootCmd, &showHiddenHelp)
 
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)

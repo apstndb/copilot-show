@@ -38,6 +38,7 @@ Available subcommands:
 
 Use `--format yaml` (or `-f yaml`) to get detailed raw data in YAML format.
 Use `--table-mode ascii` or `--table-mode markdown` to change the table rendering style.
+Use `--show-hidden --help` to include hidden diagnostics commands and hidden flags in help output.
 
 ### Examples
 

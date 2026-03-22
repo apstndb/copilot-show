@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -11,6 +12,7 @@ import (
 	"github.com/apstndb/copilot-show/pkg/modeldocs"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
+	"github.com/spf13/cobra"
 )
 
 func TestResolveVersion(t *testing.T) {
@@ -543,5 +545,78 @@ func TestValidateSessionEventsAtPath(t *testing.T) {
 	}
 	if summary.Samples[2].Issue != "known-type-local-only-fallback" || !summary.Samples[2].SDKKnownType {
 		t.Fatalf("Samples[2] = %#v, want known-type local fallback sample", summary.Samples[2])
+	}
+}
+
+func TestConfigureShowHiddenHelp(t *testing.T) {
+	t.Parallel()
+
+	var showHidden bool
+	root := &cobra.Command{Use: "root", Short: "root"}
+	root.PersistentFlags().BoolVar(&showHidden, "show-hidden", false, "Include hidden commands and hidden flags in help output")
+	root.PersistentFlags().Bool("secret", false, "secret global flag")
+	if err := root.PersistentFlags().MarkHidden("secret"); err != nil {
+		t.Fatalf("MarkHidden(secret) error = %v", err)
+	}
+
+	child := &cobra.Command{Use: "child", Short: "child"}
+	child.Flags().Bool("local-secret", false, "secret local flag")
+	if err := child.Flags().MarkHidden("local-secret"); err != nil {
+		t.Fatalf("MarkHidden(local-secret) error = %v", err)
+	}
+	root.AddCommand(child)
+	root.AddCommand(&cobra.Command{Use: "hidden", Short: "hidden", Hidden: true})
+
+	configureShowHiddenHelp(root, &showHidden)
+
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	if err := root.Help(); err != nil {
+		t.Fatalf("root.Help() error = %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "root hidden") {
+		t.Fatalf("root.Help() without showHidden unexpectedly included hidden command: %q", out)
+	}
+	if strings.Contains(out, "--secret") {
+		t.Fatalf("root.Help() without showHidden unexpectedly included hidden flag: %q", out)
+	}
+
+	showHidden = true
+	buf.Reset()
+	if err := root.Help(); err != nil {
+		t.Fatalf("root.Help() with showHidden error = %v", err)
+	}
+	out = buf.String()
+	if !strings.Contains(out, "root hidden") {
+		t.Fatalf("root.Help() with showHidden did not include hidden command: %q", out)
+	}
+	if !strings.Contains(out, "--secret") {
+		t.Fatalf("root.Help() with showHidden did not include hidden flag: %q", out)
+	}
+
+	rootSecret := root.PersistentFlags().Lookup("secret")
+	childSecret := child.Flags().Lookup("local-secret")
+	var hiddenCmd *cobra.Command
+	for _, candidate := range root.Commands() {
+		if candidate.Name() == "hidden" {
+			hiddenCmd = candidate
+			break
+		}
+	}
+	if rootSecret == nil || childSecret == nil || hiddenCmd == nil {
+		t.Fatalf("expected hidden state to exist, got root=%#v child=%#v hiddenCmd=%#v", rootSecret, childSecret, hiddenCmd)
+	}
+	if !rootSecret.Hidden || !childSecret.Hidden || !hiddenCmd.Hidden {
+		t.Fatalf("expected hidden states before wrapper, got root=%v child=%v cmd=%v", rootSecret.Hidden, childSecret.Hidden, hiddenCmd.Hidden)
+	}
+	withVisibleHiddenHelp(child, true, func() {
+		if rootSecret.Hidden || childSecret.Hidden || hiddenCmd.Hidden {
+			t.Fatalf("withVisibleHiddenHelp() did not unhide all states: root=%v child=%v cmd=%v", rootSecret.Hidden, childSecret.Hidden, hiddenCmd.Hidden)
+		}
+	})
+	if !rootSecret.Hidden || !childSecret.Hidden || !hiddenCmd.Hidden {
+		t.Fatalf("withVisibleHiddenHelp() did not restore states: root=%v child=%v cmd=%v", rootSecret.Hidden, childSecret.Hidden, hiddenCmd.Hidden)
 	}
 }
