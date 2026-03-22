@@ -1972,6 +1972,21 @@ type sessionEvent struct {
 	RawData   any
 }
 
+func (e *sessionEvent) sessionEventType() copilot.SessionEventType {
+	if e == nil {
+		return ""
+	}
+	return copilot.SessionEventType(e.Type)
+}
+
+func rawSessionEventType(raw map[string]any) copilot.SessionEventType {
+	if raw == nil {
+		return ""
+	}
+	value, _ := raw["type"].(string)
+	return copilot.SessionEventType(value)
+}
+
 type sessionTurnWindow struct {
 	TurnNumber        int            `json:"turnNumber" yaml:"turnNumber"`
 	SegmentNumber     int            `json:"segmentNumber" yaml:"segmentNumber"`
@@ -2193,7 +2208,7 @@ func visitJSONLObjects(path string, fn func(map[string]any) error) error {
 func sessionHasShutdown(eventsPath string) (bool, error) {
 	hasShutdown := false
 	err := visitJSONLObjects(eventsPath, func(ev map[string]any) error {
-		if ev["type"] == "session.shutdown" {
+		if rawSessionEventType(ev) == copilot.SessionEventTypeSessionShutdown {
 			hasShutdown = true
 			return errStopJSONLIteration
 		}
@@ -2656,7 +2671,7 @@ func buildHistorySpanProjectionRows(events []*sessionEvent) ([]historySpanProjec
 			ExtraLines:    extraLines,
 			order:         i,
 		})
-		if ev.Type != "user.message" {
+		if ev.sessionEventType() != copilot.SessionEventTypeUserMessage {
 			rows[len(rows)-1].UserEventID = ""
 			rows[len(rows)-1].UserText = ""
 		}
@@ -2731,7 +2746,8 @@ func buildSessionToolSpans(ctx *historyRenderContext) ([]*sessionToolSpan, map[s
 	consumedEventIDs := make(map[string]struct{})
 
 	for i, ev := range ctx.events {
-		if ev.Type != "tool.execution_start" && ev.Type != "tool.execution_complete" {
+		eventType := ev.sessionEventType()
+		if eventType != copilot.SessionEventTypeToolExecutionStart && eventType != copilot.SessionEventTypeToolExecutionComplete {
 			continue
 		}
 
@@ -2764,8 +2780,8 @@ func buildSessionToolSpans(ctx *historyRenderContext) ([]*sessionToolSpan, map[s
 			span.InteractionID = resolveHistoryInteractionID(ctx, ev)
 		}
 
-		switch ev.Type {
-		case "tool.execution_start":
+		switch eventType {
+		case copilot.SessionEventTypeToolExecutionStart:
 			if span.StartTime == nil {
 				ts := ev.Timestamp
 				span.StartTime = &ts
@@ -2774,7 +2790,7 @@ func buildSessionToolSpans(ctx *historyRenderContext) ([]*sessionToolSpan, map[s
 			if ev.ID != "" {
 				consumedEventIDs[ev.ID] = struct{}{}
 			}
-		case "tool.execution_complete":
+		case copilot.SessionEventTypeToolExecutionComplete:
 			if span.EndTime == nil {
 				ts := ev.Timestamp
 				span.EndTime = &ts
@@ -3174,18 +3190,18 @@ func describeUnknownHistoryEvent(ev *sessionEvent) (string, string, []string) {
 }
 
 func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, string, []string) {
-	switch ev.Type {
-	case "user.message":
+	switch ev.sessionEventType() {
+	case copilot.SessionEventTypeUserMessage:
 		return "User", eventText(ev.Data), nil
-	case "assistant.message":
+	case copilot.SessionEventTypeAssistantMessage:
 		return "Assistant", eventText(ev.Data), nil
-	case "tool.execution_start":
+	case copilot.SessionEventTypeToolExecutionStart:
 		toolName := dataString(ev.Data, "toolName")
 		if toolName == "" {
 			toolName = "<unknown>"
 		}
 		return "Tool Start", toolName, nil
-	case "tool.execution_complete":
+	case copilot.SessionEventTypeToolExecutionComplete:
 		toolName := dataString(ev.Data, "toolName")
 		if toolName == "" {
 			toolName = ctx.toolNames[dataString(ev.Data, "toolCallId")]
@@ -3199,31 +3215,31 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 		}
 		detail = fmt.Sprintf("%s (Success: %v)", detail, dataBool(ev.Data, "success"))
 		return "Tool End", detail, nil
-	case "session.start":
+	case copilot.SessionEventTypeSessionStart:
 		cwd := nestedDataString(ev.Data, "context", "cwd")
 		if cwd == "" {
 			return "Session Start", "", nil
 		}
 		return "Session Start", fmt.Sprintf("CWD: %s", cwd), nil
-	case "session.resume":
+	case copilot.SessionEventTypeSessionResume:
 		return "Session Resume", "", nil
-	case "session.context_changed":
+	case copilot.SessionEventTypeSessionContextChanged:
 		return describeSessionContextChanged(ev)
-	case "session.compaction_start":
+	case copilot.SessionEventTypeSessionCompactionStart:
 		return "Compaction Start", "", nil
-	case "session.compaction_complete":
+	case copilot.SessionEventTypeSessionCompactionComplete:
 		return describeSessionCompactionComplete(ev)
-	case "session.mode_changed":
+	case copilot.SessionEventTypeSessionModeChanged:
 		return describeSessionModeChanged(ev)
-	case "session.workspace_file_changed":
+	case copilot.SessionEventTypeSessionWorkspaceFileChanged:
 		return describeSessionWorkspaceFileChanged(ev)
-	case "tool.user_requested":
+	case copilot.SessionEventTypeToolUserRequested:
 		return describeToolUserRequested(ev)
-	case "session.info":
+	case copilot.SessionEventTypeSessionInfo:
 		return describeSessionInfo(ev)
-	case "session.model_change":
+	case copilot.SessionEventTypeSessionModelChange:
 		return describeSessionModelChange(ev)
-	case "assistant.turn_start":
+	case copilot.SessionEventTypeAssistantTurnStart:
 		if turn, ok := ctx.turnStartByEventID[ev.ID]; ok {
 			detail := fmt.Sprintf("Turn #%d, Segment %d, Turn ID %s", turn.TurnNumber, turn.SegmentNumber, turn.TurnID)
 			if turn.InteractionID != "" {
@@ -3232,12 +3248,12 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 			return "Assistant Turn Start", detail, nil
 		}
 		return "Assistant Turn Start", "", nil
-	case "assistant.turn_end":
+	case copilot.SessionEventTypeAssistantTurnEnd:
 		if turn, ok := ctx.turnEndByEventID[ev.ID]; ok {
 			return "Assistant Turn End", fmt.Sprintf("Turn #%d, Duration: %s", turn.TurnNumber, turn.durationString(ctx.lastEventTime)), nil
 		}
 		return "Assistant Turn End", "", nil
-	case "session.shutdown":
+	case copilot.SessionEventTypeSessionShutdown:
 		total, _ := ev.Data["totalPremiumRequests"].(float64)
 		var extraLines []string
 		if metrics, ok := ev.Data["modelMetrics"].(map[string]any); ok {
@@ -3268,25 +3284,25 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 			}
 		}
 		return "Session Shutdown", fmt.Sprintf("Total Premium Requests: %.0f", total), extraLines
-	case "skill.invoked":
+	case copilot.SessionEventTypeSkillInvoked:
 		name := dataString(ev.Data, "name")
 		if name == "" {
 			name = dataString(ev.Data, "skillName")
 		}
 		return "Skill Invoked", name, nil
-	case "subagent.started":
+	case copilot.SessionEventTypeSubagentStarted:
 		name := dataString(ev.Data, "agentDisplayName")
 		if name == "" {
 			name = dataString(ev.Data, "agentName")
 		}
 		return "Subagent Started", name, nil
-	case "subagent.completed":
+	case copilot.SessionEventTypeSubagentCompleted:
 		name := dataString(ev.Data, "agentDisplayName")
 		if name == "" {
 			name = dataString(ev.Data, "agentName")
 		}
 		return "Subagent Completed", name, nil
-	case "system.notification":
+	case copilot.SessionEventTypeSystemNotification:
 		kind := nestedDataString(ev.Data, "kind", "type")
 		if kind == "" {
 			kind = dataString(ev.Data, "type")
@@ -3295,9 +3311,9 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 			kind = "notification"
 		}
 		return "System Notification", kind, nil
-	case "session.plan_changed":
+	case copilot.SessionEventTypeSessionPlanChanged:
 		return "Plan Changed", "", nil
-	case "abort":
+	case copilot.SessionEventTypeAbort:
 		return "Abort", "", nil
 	default:
 		return describeUnknownHistoryEvent(ev)
@@ -3323,7 +3339,7 @@ func formatHistoryExtraLine(depth int, detail string) string {
 func buildToolStartEventIndex(events []*sessionEvent) map[string]*sessionEvent {
 	toolStarts := make(map[string]*sessionEvent)
 	for _, ev := range events {
-		if ev.Type != "tool.execution_start" {
+		if ev.sessionEventType() != copilot.SessionEventTypeToolExecutionStart {
 			continue
 		}
 		toolCallID := dataString(ev.Data, "toolCallId")
@@ -3382,7 +3398,7 @@ func resolveHistoryInteractionID(ctx *historyRenderContext, ev *sessionEvent) st
 func buildToolNameIndex(events []*sessionEvent) map[string]string {
 	toolNames := make(map[string]string)
 	for _, ev := range events {
-		if ev.Type != "tool.execution_start" {
+		if ev.sessionEventType() != copilot.SessionEventTypeToolExecutionStart {
 			continue
 		}
 		toolCallID := dataString(ev.Data, "toolCallId")
@@ -3633,11 +3649,11 @@ func buildTurnWindows(events []*sessionEvent) []*sessionTurnWindow {
 		// session.start/session.resume begin a new segment. turnId is only stable
 		// within a segment, so open turn queues reset here instead of assuming
 		// session-global turn numbering across resumes.
-		switch ev.Type {
-		case "session.start", "session.resume":
+		switch ev.sessionEventType() {
+		case copilot.SessionEventTypeSessionStart, copilot.SessionEventTypeSessionResume:
 			segmentNumber++
 			openTurnsByID = make(map[string][]*sessionTurnWindow)
-		case "assistant.turn_start":
+		case copilot.SessionEventTypeAssistantTurnStart:
 			if segmentNumber == 0 {
 				segmentNumber = 1
 			}
@@ -3654,7 +3670,7 @@ func buildTurnWindows(events []*sessionEvent) []*sessionTurnWindow {
 			}
 			turns = append(turns, turn)
 			openTurnsByID[turn.TurnID] = append(openTurnsByID[turn.TurnID], turn)
-		case "assistant.turn_end":
+		case copilot.SessionEventTypeAssistantTurnEnd:
 			turnID := dataString(ev.Data, "turnId")
 			queue := openTurnsByID[turnID]
 			if len(queue) == 0 {
@@ -3673,7 +3689,7 @@ func buildTurnWindows(events []*sessionEvent) []*sessionTurnWindow {
 
 	lastEventTime := events[len(events)-1].Timestamp
 	for _, turn := range turns {
-		if parent := eventByID[turn.ParentEventID]; parent != nil && parent.Type == "user.message" {
+		if parent := eventByID[turn.ParentEventID]; parent != nil && parent.sessionEventType() == copilot.SessionEventTypeUserMessage {
 			turn.ParentUserEventID = parent.ID
 			turn.UserMessage = eventText(parent.Data)
 		}
@@ -3683,29 +3699,30 @@ func buildTurnWindows(events []*sessionEvent) []*sessionTurnWindow {
 			if ev.Timestamp.Before(turn.StartTime) || ev.Timestamp.After(windowEnd) {
 				continue
 			}
-			if ev.Type != "session.shutdown" && ev.Timestamp.After(turn.lastActivityTime) {
+			eventType := ev.sessionEventType()
+			if eventType != copilot.SessionEventTypeSessionShutdown && ev.Timestamp.After(turn.lastActivityTime) {
 				turn.lastActivityTime = ev.Timestamp
 			}
-			switch ev.Type {
-			case "assistant.message":
+			switch eventType {
+			case copilot.SessionEventTypeAssistantMessage:
 				if text := eventText(ev.Data); text != "" {
 					turn.AssistantMessages = append(turn.AssistantMessages, text)
 				}
-			case "tool.execution_start":
+			case copilot.SessionEventTypeToolExecutionStart:
 				if toolName := dataString(ev.Data, "toolName"); toolName != "" {
 					turn.ToolCalls[toolName]++
 				}
-			case "tool.execution_complete":
+			case copilot.SessionEventTypeToolExecutionComplete:
 				if model := dataString(ev.Data, "model"); model != "" {
 					turn.ModelCalls[model]++
 				}
-			case "skill.invoked":
+			case copilot.SessionEventTypeSkillInvoked:
 				turn.SkillEvents++
-			case "subagent.started", "subagent.completed":
+			case copilot.SessionEventTypeSubagentStarted, copilot.SessionEventTypeSubagentCompleted:
 				turn.SubagentEvents++
-			case "session.plan_changed":
+			case copilot.SessionEventTypeSessionPlanChanged:
 				turn.PlanChangeEvents++
-			case "abort":
+			case copilot.SessionEventTypeAbort:
 				turn.AbortEvents++
 			}
 		}
@@ -4159,7 +4176,8 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 				return nil
 			}
 
-			if ev["type"] == "session.shutdown" {
+			switch rawSessionEventType(ev) {
+			case copilot.SessionEventTypeSessionShutdown:
 				if total, ok := data["totalPremiumRequests"].(float64); ok {
 					totalPremiumRequests += total
 				}
@@ -4189,7 +4207,10 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 						}
 					}
 				}
-			} else if !hasShutdown && ev["type"] == "tool.execution_complete" {
+			case copilot.SessionEventTypeToolExecutionComplete:
+				if hasShutdown {
+					break
+				}
 				model, _ := data["model"].(string)
 				if model != "" {
 					if _, ok := stats[model]; !ok {
