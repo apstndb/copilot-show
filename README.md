@@ -131,8 +131,8 @@ copilot-show usage -m 0 --last 3
 
 Aggregates usage statistics from local session history (`~/.copilot/session-state/*/events.jsonl`).
 Useful for understanding which models are consuming your quota.
-The `Premium Requests (Cost)` column preserves fractional multipliers such as `0.33`.
-Use `--api-costs` to estimate equivalent API cost from shutdown token usage, including cached token reads when the selected model has a verified cached-input price.
+The `PR` column means premium requests and preserves fractional multipliers such as `0.33`. `PR Cost` is the hypothetical $0.04-per-PR overage charge; if your usage stays within the premium requests included in your plan, the actual overage billed can still be $0.
+Use `--api-costs` to estimate equivalent API cost from shutdown token usage. When shutdown metrics contain `cacheReadTokens`, the estimate treats them as a subset of `inputTokens`, prices only the uncached remainder at the full input-token rate, and prices cached reads separately when the selected model has a verified cached-input price. The default table lays out token kinds, token counts, `USD/Mtok` rates, and cost subtotals as aligned multiline cells within each model row, and its `Input Tokens` row shows the billed uncached remainder rather than the raw total input. If future shutdown logs add extra token-usage keys such as `cacheOutputTokens`, the new table will add an extra row for that model automatically; those rows remain unpriced until explicit API-pricing support is added.
 Models without matching API pricing still remain in the output; their API-cost cells stay empty and the printed total becomes a lower bound.
 Model availability is still plan-dependent, so local shutdown metrics can contain model IDs that are not currently visible in `copilot-show models`.
 Use `--api-pricing <file>` to overlay those built-in public prices with local YAML values. This is intended as a safe starting point for local effective-price overrides, without baking private contract terms into the tool.

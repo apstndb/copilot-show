@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/apstndb/copilot-show/pkg/analyze"
 	"github.com/apstndb/copilot-show/pkg/modeldocs"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
@@ -338,6 +340,24 @@ func strptr(value string) *string {
 	return &value
 }
 
+func parseTestSessionEvents(t *testing.T, rows []string) []*sessionEvent {
+	t.Helper()
+
+	events := make([]*sessionEvent, 0, len(rows))
+	for i, row := range rows {
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(row), &raw); err != nil {
+			t.Fatalf("json.Unmarshal(row %d) error = %v", i+1, err)
+		}
+		ev := parseSessionEvent(raw)
+		if ev == nil {
+			t.Fatalf("parseSessionEvent(row %d) returned nil", i+1)
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
 func TestParseSessionEventSupportsBestEffortTimestampFallbacks(t *testing.T) {
 	t.Parallel()
 
@@ -515,6 +535,12 @@ func TestValidateSessionEventsAtPath(t *testing.T) {
 	if summary.UnknownTypeSDKCompatibleRows != 1 {
 		t.Fatalf("UnknownTypeSDKCompatibleRows = %d, want 1", summary.UnknownTypeSDKCompatibleRows)
 	}
+	if summary.ResumeRows != 0 || summary.GracefulResumeRows != 0 || summary.ResumeWhileInUseRows != 0 || summary.ResumeFromLastEventRows != 0 || summary.SuspiciousResumeRows != 0 {
+		t.Fatalf("resume counters = %d/%d/%d/%d/%d, want all zero", summary.ResumeRows, summary.GracefulResumeRows, summary.ResumeWhileInUseRows, summary.ResumeFromLastEventRows, summary.SuspiciousResumeRows)
+	}
+	if len(summary.ResumeIssueCounts) != 0 || len(summary.ResumeSamples) != 0 {
+		t.Fatalf("resume continuity output = %#v / %#v, want none", summary.ResumeIssueCounts, summary.ResumeSamples)
+	}
 	if len(summary.IssueCounts) != 3 {
 		t.Fatalf("IssueCounts len = %d, want 3 (%#v)", len(summary.IssueCounts), summary.IssueCounts)
 	}
@@ -545,6 +571,219 @@ func TestValidateSessionEventsAtPath(t *testing.T) {
 	}
 	if summary.Samples[2].Issue != "known-type-local-only-fallback" || !summary.Samples[2].SDKKnownType {
 		t.Fatalf("Samples[2] = %#v, want known-type local fallback sample", summary.Samples[2])
+	}
+}
+
+func TestValidateSessionEventsAtPathResumeContinuity(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	eventsPath := filepath.Join(dir, "events.jsonl")
+	rows := []string{
+		`{"id":"evt-1","type":"session.start","timestamp":"2026-03-23T00:00:00Z","data":{"sessionId":"session-1"}}`,
+		`{"id":"evt-2","type":"user.message","timestamp":"2026-03-23T00:00:01Z","data":{"content":"hello"}}`,
+		`{"id":"evt-3","type":"session.shutdown","timestamp":"2026-03-23T00:00:02Z","data":{"totalPremiumRequests":1}}`,
+		`{"id":"evt-4","type":"session.resume","timestamp":"2026-03-23T00:00:03Z","parentId":"evt-3","data":{"resumeTime":"2026-03-23T00:00:03Z","eventCount":3,"selectedModel":"gpt-5.4","reasoningEffort":"xhigh","context":{"cwd":"/tmp","gitRoot":"/tmp"},"alreadyInUse":false}}`,
+		`{"id":"evt-5","type":"assistant.turn_end","timestamp":"2026-03-23T00:00:04Z","parentId":"evt-4","data":{"turnId":"1"}}`,
+		`{"id":"evt-6","type":"session.resume","timestamp":"2026-03-23T00:10:04Z","parentId":"evt-5","data":{"resumeTime":"2026-03-23T00:10:04Z","eventCount":5,"selectedModel":"gpt-5.4","reasoningEffort":"xhigh","context":{"cwd":"/tmp","gitRoot":"/tmp"},"alreadyInUse":true}}`,
+		`{"id":"evt-7","type":"assistant.turn_end","timestamp":"2026-03-23T00:10:05Z","parentId":"evt-6","data":{"turnId":"2"}}`,
+		`{"id":"evt-8","type":"session.resume","timestamp":"2026-03-23T00:20:05Z","parentId":"evt-7","data":{"resumeTime":"2026-03-23T00:20:05Z","eventCount":7,"selectedModel":"gpt-5.4","reasoningEffort":"xhigh","context":{"cwd":"/tmp","gitRoot":"/tmp"},"alreadyInUse":false}}`,
+		`{"id":"evt-9","type":"session.resume","timestamp":"2026-03-23T00:20:06Z","parentId":"evt-1","data":{"resumeTime":"2026-03-23T00:20:06Z","eventCount":999,"selectedModel":"gpt-5.4","reasoningEffort":"xhigh","context":{"cwd":"/tmp","gitRoot":"/tmp"},"alreadyInUse":false}}`,
+	}
+	if err := os.WriteFile(eventsPath, []byte(strings.Join(rows, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", eventsPath, err)
+	}
+
+	summary, err := validateSessionEventsAtPath("session-1", eventsPath, 10)
+	if err != nil {
+		t.Fatalf("validateSessionEventsAtPath() error = %v", err)
+	}
+
+	if summary.ResumeRows != 4 {
+		t.Fatalf("ResumeRows = %d, want 4", summary.ResumeRows)
+	}
+	if summary.GracefulResumeRows != 1 {
+		t.Fatalf("GracefulResumeRows = %d, want 1", summary.GracefulResumeRows)
+	}
+	if summary.ResumeWhileInUseRows != 1 {
+		t.Fatalf("ResumeWhileInUseRows = %d, want 1", summary.ResumeWhileInUseRows)
+	}
+	if summary.ResumeFromLastEventRows != 1 {
+		t.Fatalf("ResumeFromLastEventRows = %d, want 1", summary.ResumeFromLastEventRows)
+	}
+	if summary.SuspiciousResumeRows != 1 {
+		t.Fatalf("SuspiciousResumeRows = %d, want 1", summary.SuspiciousResumeRows)
+	}
+	if len(summary.ResumeIssueCounts) != 3 {
+		t.Fatalf("ResumeIssueCounts len = %d, want 3 (%#v)", len(summary.ResumeIssueCounts), summary.ResumeIssueCounts)
+	}
+	if len(summary.ResumeSamples) != 3 {
+		t.Fatalf("ResumeSamples len = %d, want 3 (%#v)", len(summary.ResumeSamples), summary.ResumeSamples)
+	}
+
+	wantResumeIssues := map[string]int{
+		"resume-event-count-mismatch": 1,
+		"resume-while-in-use":         1,
+		"resume-from-last-event":      1,
+	}
+	for _, issue := range summary.ResumeIssueCounts {
+		if wantResumeIssues[issue.Issue] != issue.Rows {
+			t.Fatalf("ResumeIssueCounts contains %q=%d, want %#v", issue.Issue, issue.Rows, wantResumeIssues)
+		}
+		delete(wantResumeIssues, issue.Issue)
+	}
+	if len(wantResumeIssues) != 0 {
+		t.Fatalf("ResumeIssueCounts missing issues: %#v", wantResumeIssues)
+	}
+
+	if summary.ResumeSamples[0].Issue != "resume-while-in-use" {
+		t.Fatalf("ResumeSamples[0].Issue = %q, want resume-while-in-use", summary.ResumeSamples[0].Issue)
+	}
+	if summary.ResumeSamples[0].ParentType != "assistant.turn_end" || !summary.ResumeSamples[0].AlreadyInUse || !summary.ResumeSamples[0].EventCountMatches || !summary.ResumeSamples[0].ParentMatchesPreviousEvent || summary.ResumeSamples[0].ParentMatchesPreviousShutdown {
+		t.Fatalf("ResumeSamples[0] = %#v, want in-use resume sample", summary.ResumeSamples[0])
+	}
+	if summary.ResumeSamples[0].GapSeconds != 600 {
+		t.Fatalf("ResumeSamples[0].GapSeconds = %d, want 600", summary.ResumeSamples[0].GapSeconds)
+	}
+
+	if summary.ResumeSamples[1].Issue != "resume-from-last-event" {
+		t.Fatalf("ResumeSamples[1].Issue = %q, want resume-from-last-event", summary.ResumeSamples[1].Issue)
+	}
+	if summary.ResumeSamples[1].ParentType != "assistant.turn_end" || summary.ResumeSamples[1].AlreadyInUse || !summary.ResumeSamples[1].EventCountMatches {
+		t.Fatalf("ResumeSamples[1] = %#v, want non-in-use last-event sample", summary.ResumeSamples[1])
+	}
+
+	if summary.ResumeSamples[2].Issue != "resume-event-count-mismatch" {
+		t.Fatalf("ResumeSamples[2].Issue = %q, want resume-event-count-mismatch", summary.ResumeSamples[2].Issue)
+	}
+	if summary.ResumeSamples[2].ParentType != "session.start" || summary.ResumeSamples[2].EventCountMatches {
+		t.Fatalf("ResumeSamples[2] = %#v, want mismatched older-parent sample", summary.ResumeSamples[2])
+	}
+}
+
+func TestBuildSessionResumeBranchReport(t *testing.T) {
+	t.Parallel()
+
+	events := parseTestSessionEvents(t, []string{
+		`{"id":"evt-1","type":"session.start","timestamp":"2026-03-24T00:00:00Z","data":{"sessionId":"session-1"}}`,
+		`{"id":"evt-2","type":"user.message","timestamp":"2026-03-24T00:00:01Z","data":{"interactionId":"i1","content":"hello"}}`,
+		`{"id":"evt-3","type":"assistant.turn_start","timestamp":"2026-03-24T00:00:02Z","parentId":"evt-2","data":{"turnId":"1","interactionId":"i1"}}`,
+		`{"id":"evt-4","type":"assistant.message","timestamp":"2026-03-24T00:00:03Z","parentId":"evt-3","data":{"interactionId":"i1","content":"hi"}}`,
+		`{"id":"evt-5","type":"session.shutdown","timestamp":"2026-03-24T00:00:04Z","data":{"totalPremiumRequests":1}}`,
+		`{"id":"evt-6","type":"session.resume","timestamp":"2026-03-24T00:00:05Z","parentId":"evt-5","data":{"eventCount":5,"alreadyInUse":false}}`,
+		`{"id":"evt-7","type":"user.message","timestamp":"2026-03-24T00:00:06Z","data":{"interactionId":"i2","content":"branch one"}}`,
+		`{"id":"evt-8","type":"assistant.turn_start","timestamp":"2026-03-24T00:00:07Z","parentId":"evt-7","data":{"turnId":"2","interactionId":"i2"}}`,
+		`{"id":"evt-9","type":"assistant.message","timestamp":"2026-03-24T00:00:08Z","parentId":"evt-8","data":{"interactionId":"i2","content":"first branch reply"}}`,
+		`{"id":"evt-10","type":"assistant.turn_end","timestamp":"2026-03-24T00:00:09Z","parentId":"evt-8","data":{"turnId":"2","interactionId":"i2"}}`,
+		`{"id":"evt-11","type":"user.message","timestamp":"2026-03-24T00:00:10Z","data":{"interactionId":"i3","content":"branch two"}}`,
+		`{"id":"evt-12","type":"assistant.turn_start","timestamp":"2026-03-24T00:00:11Z","parentId":"evt-11","data":{"turnId":"3","interactionId":"i3"}}`,
+		`{"id":"evt-13","type":"assistant.message","timestamp":"2026-03-24T00:00:12Z","parentId":"evt-12","data":{"interactionId":"i3","content":"second branch reply"}}`,
+		`{"id":"evt-14","type":"assistant.turn_end","timestamp":"2026-03-24T00:00:13Z","parentId":"evt-12","data":{"turnId":"3","interactionId":"i3"}}`,
+		`{"id":"evt-15","type":"session.resume","timestamp":"2026-03-24T00:00:14Z","parentId":"evt-14","data":{"eventCount":14,"alreadyInUse":true}}`,
+		`{"id":"evt-16","type":"user.message","timestamp":"2026-03-24T00:00:15Z","data":{"interactionId":"i4","content":"parallel branch"}}`,
+		`{"id":"evt-17","type":"assistant.turn_start","timestamp":"2026-03-24T00:00:16Z","parentId":"evt-16","data":{"turnId":"4","interactionId":"i4"}}`,
+		`{"id":"evt-18","type":"tool.execution_start","timestamp":"2026-03-24T00:00:17Z","parentId":"evt-17","data":{"toolCallId":"call-1","toolName":"bash","interactionId":"i4"}}`,
+		`{"id":"evt-19","type":"user.message","timestamp":"2026-03-24T00:00:18Z","data":{"interactionId":"i5","content":"competing branch"}}`,
+		`{"id":"evt-20","type":"tool.execution_complete","timestamp":"2026-03-24T00:00:19Z","parentId":"evt-18","data":{"toolCallId":"call-1","interactionId":"i4","model":"gpt-5.4","success":true}}`,
+		`{"id":"evt-21","type":"assistant.turn_end","timestamp":"2026-03-24T00:00:20Z","parentId":"evt-17","data":{"turnId":"4","interactionId":"i4"}}`,
+		`{"id":"evt-22","type":"session.resume","timestamp":"2026-03-24T00:00:21Z","parentId":"evt-21","data":{"eventCount":999,"alreadyInUse":false}}`,
+		`{"id":"evt-23","type":"session.shutdown","timestamp":"2026-03-24T00:00:22Z","data":{"totalPremiumRequests":2}}`,
+	})
+
+	report, err := buildSessionResumeBranchReport("session-1", events)
+	if err != nil {
+		t.Fatalf("buildSessionResumeBranchReport() error = %v", err)
+	}
+
+	if report.ResumeRows != 3 || report.GracefulResumeRows != 1 || report.ResumeWhileInUseRows != 1 || report.ResumeEventCountMismatchRows != 1 {
+		t.Fatalf("resume counters = %#v", report)
+	}
+	if len(report.Branches) != 3 {
+		t.Fatalf("Branches len = %d, want 3", len(report.Branches))
+	}
+
+	if report.Branches[0].Kind != "graceful" || report.Branches[0].SeedReason != "first-new-interaction" {
+		t.Fatalf("Branches[0] = %#v, want graceful first-new-interaction", report.Branches[0])
+	}
+	if len(report.Branches[0].BranchInteractionIDs) != 2 || report.Branches[0].BranchInteractionIDs[0] != "i2" || report.Branches[0].BranchInteractionIDs[1] != "i3" {
+		t.Fatalf("Branches[0].BranchInteractionIDs = %#v, want [i2 i3]", report.Branches[0].BranchInteractionIDs)
+	}
+	if report.Branches[0].FirstInteractionRow != 7 || report.Branches[0].LastInteractionRow != 14 || report.Branches[0].UserMessages != 2 || report.Branches[0].Turns != 2 || report.Branches[0].ToolCalls != 0 || report.Branches[0].Confidence != "high" {
+		t.Fatalf("Branches[0] summary = %#v", report.Branches[0])
+	}
+	if report.Branches[0].FirstUserText != "branch one" {
+		t.Fatalf("Branches[0].FirstUserText = %q, want %q", report.Branches[0].FirstUserText, "branch one")
+	}
+
+	if report.Branches[1].Kind != "resume-while-in-use" || report.Branches[1].SeedReason != "first-new-interaction" {
+		t.Fatalf("Branches[1] = %#v, want resume-while-in-use first-new-interaction", report.Branches[1])
+	}
+	if len(report.Branches[1].BranchInteractionIDs) != 1 || report.Branches[1].BranchInteractionIDs[0] != "i4" {
+		t.Fatalf("Branches[1].BranchInteractionIDs = %#v, want [i4]", report.Branches[1].BranchInteractionIDs)
+	}
+	if len(report.Branches[1].CompetingInteractionIDs) != 1 || report.Branches[1].CompetingInteractionIDs[0] != "i5" {
+		t.Fatalf("Branches[1].CompetingInteractionIDs = %#v, want [i5]", report.Branches[1].CompetingInteractionIDs)
+	}
+	if report.Branches[1].ToolCalls != 1 || len(report.Branches[1].Models) != 1 || report.Branches[1].Models[0] != "gpt-5.4" || report.Branches[1].Confidence != "medium" {
+		t.Fatalf("Branches[1] tool/model summary = %#v", report.Branches[1])
+	}
+
+	if report.Branches[2].Kind != "resume-event-count-mismatch" || report.Branches[2].SeedReason != "no-interaction" || len(report.Branches[2].BranchInteractionIDs) != 0 || report.Branches[2].Confidence != "low" {
+		t.Fatalf("Branches[2] = %#v, want mismatch branch without inferred interaction", report.Branches[2])
+	}
+	if report.Branches[2].NextShutdownRow != 23 {
+		t.Fatalf("Branches[2].NextShutdownRow = %d, want 23", report.Branches[2].NextShutdownRow)
+	}
+}
+
+func TestFormatStatsAPICostDetails(t *testing.T) {
+	t.Parallel()
+
+	cacheReadRate := 0.25
+	stat := &analyze.ModelStat{
+		Input:     3_000_000,
+		CacheRead: 2_000_000,
+		Output:    1_000_000,
+		ExtraUsageTokens: map[string]int64{
+			"cacheOutputTokens": 250_000,
+		},
+		EstimatedAPICost: &analyze.APICostEstimate{
+			UncachedInputTokens: 1_000_000,
+			InputUSDPerMTok:     2.5,
+			CacheReadUSDPerMTok: &cacheReadRate,
+			OutputUSDPerMTok:    15,
+			InputUSD:            2.5,
+			CacheReadUSD:        0.5,
+			OutputUSD:           15,
+			TotalUSD:            18,
+			IsComplete:          true,
+		},
+	}
+
+	kinds := formatStatsAPICostKinds(stat)
+	if !strings.Contains(kinds, "Input Tokens") || !strings.Contains(kinds, "Cache Read Tokens") || !strings.Contains(kinds, "Cache Output Tokens") || !strings.Contains(kinds, "Output Tokens") {
+		t.Fatalf("formatStatsAPICostKinds() = %q", kinds)
+	}
+
+	tokens := formatStatsAPICostTokenValues(stat)
+	if !strings.Contains(tokens, "1000000") || !strings.Contains(tokens, "2000000") || !strings.Contains(tokens, "250000") {
+		t.Fatalf("formatStatsAPICostTokenValues() = %q", tokens)
+	}
+	if strings.Contains(tokens, "3000000") {
+		t.Fatalf("formatStatsAPICostTokenValues() = %q, want billed input count only", tokens)
+	}
+
+	rates := formatStatsAPICostRates(stat)
+	if !strings.Contains(rates, "2.5") || !strings.Contains(rates, "0.25") || !strings.Contains(rates, "15") {
+		t.Fatalf("formatStatsAPICostRates() = %q", rates)
+	}
+
+	subtotals := formatStatsAPICostSubtotals(stat)
+	if !strings.Contains(subtotals, "$2.50") || !strings.Contains(subtotals, "$0.50") || !strings.Contains(subtotals, "$15.00") {
+		t.Fatalf("formatStatsAPICostSubtotals() = %q", subtotals)
+	}
+	if !strings.Contains(subtotals, "-") {
+		t.Fatalf("formatStatsAPICostSubtotals() = %q, want placeholder for unpriced extra usage", subtotals)
 	}
 }
 

@@ -12,14 +12,22 @@ The inspected logs support treating session boundaries as structured segments:
 
 - each segment starts at `session.start` or `session.resume`,
 - each closed segment ends at `session.shutdown`,
-- `session.resume.parentId` matched the immediately preceding `session.shutdown.id` in the inspected restart,
-- `session.resume.data.eventCount` matched the exact number of rows that existed before the resume boundary.
+- graceful resumes had `session.resume.parentId == previous session.shutdown.id`,
+- an observed in-use resume kept `session.resume.data.eventCount == rows_before_resume`, set `data.alreadyInUse == true`, and pointed `session.resume.parentId` at the immediately preceding persisted event (`assistant.turn_end`) instead of a shutdown row,
+- a separate observed recovery after an unclean interruption also pointed `session.resume.parentId` at the immediately preceding persisted event instead of a shutdown row,
+- `session.resume.data.eventCount` matched the exact number of rows that existed before the resume boundary in both cases.
 
 That makes `session.resume` a strong continuity checkpoint rather than a loose informational marker.
 
 It also explains why `buildTurnWindows` resets segment-local turn tracking on `session.start` / `session.resume`: the local stream treats those rows as hard boundaries, not soft hints.
 
-For future validation work, the useful rule is: if a resumed segment does **not** satisfy `resume.parentId == previous shutdown.id` or `resume.data.eventCount == rows_before_resume`, treat that session as suspicious and surface a warning instead of silently trusting the continuation.
+For future validation work, the useful rule is:
+
+- if `resume.data.eventCount != rows_before_resume`, treat the continuation as noteworthy rather than automatically corrupted; some older logs show a stable legacy `+1` offset across every resume row in the session,
+- else if `resume.parentId == previous shutdown.id`, treat it as a graceful resume,
+- else if `resume.parentId == immediately previous event.id` and `resume.data.alreadyInUse == true`, treat it as an intentional in-use resume of a live session that another process still held,
+- else if `resume.parentId == immediately previous event.id`, treat it as a recovered continuation from the last persisted event; that pattern alone is not enough to distinguish crash recovery from other non-graceful handoff modes,
+- otherwise, surface a warning instead of silently trusting the continuation.
 
 ## `turnId` and `interactionId` caveats
 

@@ -1,6 +1,7 @@
 package analyze
 
 import (
+	"sort"
 	"strings"
 )
 
@@ -13,6 +14,7 @@ type ModelStat struct {
 	CacheRead               int64            `json:"cacheReadTokens,omitempty" yaml:"cacheReadTokens,omitempty"`
 	CacheWrite              int64            `json:"cacheWriteTokens,omitempty" yaml:"cacheWriteTokens,omitempty"`
 	Output                  int64            `json:"outputTokens" yaml:"outputTokens"`
+	ExtraUsageTokens        map[string]int64 `json:"extraUsageTokens,omitempty" yaml:"extraUsageTokens,omitempty"`
 	EstimatedOverageCostUSD float64          `json:"estimatedOverageCostUsd,omitempty" yaml:"estimatedOverageCostUsd,omitempty"`
 	EstimatedAPICost        *APICostEstimate `json:"estimatedApiCost,omitempty" yaml:"estimatedApiCost,omitempty"`
 }
@@ -27,6 +29,11 @@ type priceCatalogEntry struct {
 }
 
 type APICostEstimate struct {
+	UncachedInputTokens    int64    `json:"uncachedInputTokens,omitempty" yaml:"uncachedInputTokens,omitempty"`
+	InputUSDPerMTok        float64  `json:"inputUsdPerMToken" yaml:"inputUsdPerMToken"`
+	CacheReadUSDPerMTok    *float64 `json:"cacheReadUsdPerMToken,omitempty" yaml:"cacheReadUsdPerMToken,omitempty"`
+	CacheWriteUSDPerMTok   *float64 `json:"cacheWriteUsdPerMToken,omitempty" yaml:"cacheWriteUsdPerMToken,omitempty"`
+	OutputUSDPerMTok       float64  `json:"outputUsdPerMToken" yaml:"outputUsdPerMToken"`
 	InputUSD               float64  `json:"inputUsd" yaml:"inputUsd"`
 	CacheReadUSD           float64  `json:"cacheReadUsd,omitempty" yaml:"cacheReadUsd,omitempty"`
 	CacheWriteUSD          float64  `json:"cacheWriteUsd,omitempty" yaml:"cacheWriteUsd,omitempty"`
@@ -179,24 +186,90 @@ func NormalizeModelKey(s string) string {
 	return strings.TrimSuffix(s, "preview")
 }
 
+func (stat *ModelStat) AddExtraUsage(key string, tokens int64) {
+	if stat == nil || key == "" || tokens == 0 {
+		return
+	}
+	if stat.ExtraUsageTokens == nil {
+		stat.ExtraUsageTokens = make(map[string]int64)
+	}
+	stat.ExtraUsageTokens[key] += tokens
+	if stat.ExtraUsageTokens[key] == 0 {
+		delete(stat.ExtraUsageTokens, key)
+	}
+}
+
+func (stat *ModelStat) SortedExtraUsageKeys() []string {
+	if stat == nil || len(stat.ExtraUsageTokens) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(stat.ExtraUsageTokens))
+	for key, tokens := range stat.ExtraUsageTokens {
+		if tokens == 0 {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (stat *ModelStat) HasTokenUsage() bool {
+	if stat == nil {
+		return false
+	}
+	if stat.Input != 0 || stat.CacheRead != 0 || stat.CacheWrite != 0 || stat.Output != 0 {
+		return true
+	}
+	for _, tokens := range stat.ExtraUsageTokens {
+		if tokens != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func EstimateAPICost(model string, stat *ModelStat) *APICostEstimate {
 	return EstimateAPICostWithOverrides(model, stat, nil)
 }
 
+func effectiveUncachedInputTokens(stat *ModelStat) (int64, bool) {
+	if stat.CacheRead <= 0 {
+		return stat.Input, true
+	}
+	// Local session.shutdown usage appears to report inputTokens as total input
+	// that already includes cacheReadTokens. Price only the uncached remainder
+	// at the full input rate and bill cache reads separately.
+	if stat.Input < stat.CacheRead {
+		return 0, false
+	}
+	return stat.Input - stat.CacheRead, true
+}
+
 func EstimateAPICostWithOverrides(model string, stat *ModelStat, overrides *APIPricingOverrides) *APICostEstimate {
-	if stat.Input == 0 && stat.CacheRead == 0 && stat.CacheWrite == 0 && stat.Output == 0 {
+	if !stat.HasTokenUsage() {
 		return nil
 	}
 	price, ok := resolveAPIPricingEntry(model, overrides)
 	if !ok {
 		return nil
 	}
+	uncachedInputTokens, uncachedInputOK := effectiveUncachedInputTokens(stat)
 	estimate := &APICostEstimate{
-		InputUSD:          float64(stat.Input) / 1_000_000 * price.InputUSDPerMTok,
-		OutputUSD:         float64(stat.Output) / 1_000_000 * price.OutputUSDPerMTok,
-		IsComplete:        true,
-		PriceCatalogModel: price.ModelID,
-		Source:            price.Source,
+		UncachedInputTokens:  uncachedInputTokens,
+		InputUSDPerMTok:      price.InputUSDPerMTok,
+		CacheReadUSDPerMTok:  price.CacheReadUSDPerMTok,
+		CacheWriteUSDPerMTok: price.CacheWriteUSDPerMTok,
+		OutputUSDPerMTok:     price.OutputUSDPerMTok,
+		InputUSD:             float64(uncachedInputTokens) / 1_000_000 * price.InputUSDPerMTok,
+		OutputUSD:            float64(stat.Output) / 1_000_000 * price.OutputUSDPerMTok,
+		IsComplete:           true,
+		PriceCatalogModel:    price.ModelID,
+		Source:               price.Source,
+	}
+	if !uncachedInputOK {
+		estimate.IsComplete = false
+		estimate.MissingPriceComponents = append(estimate.MissingPriceComponents, "inclusiveInputAssumptionMismatch")
 	}
 	estimate.TotalUSD = estimate.InputUSD + estimate.OutputUSD
 
@@ -217,6 +290,10 @@ func EstimateAPICostWithOverrides(model string, stat *ModelStat, overrides *APIP
 			estimate.IsComplete = false
 			estimate.MissingPriceComponents = append(estimate.MissingPriceComponents, "cacheWriteTokens")
 		}
+	}
+	for _, key := range stat.SortedExtraUsageKeys() {
+		estimate.IsComplete = false
+		estimate.MissingPriceComponents = append(estimate.MissingPriceComponents, key)
 	}
 
 	return estimate

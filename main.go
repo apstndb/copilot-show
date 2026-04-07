@@ -18,6 +18,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/apstndb/copilot-show/pkg/analyze"
 	"github.com/apstndb/copilot-show/pkg/modeldocs"
@@ -235,6 +236,7 @@ func main() {
 		newSessionsCmd(client),
 		newHistoryCmd(client),
 		newGraphCmd(client),
+		newResumeBranchesCmd(client),
 		newValidateEventsCmd(client),
 	}
 	for _, c := range hiddenCmds {
@@ -1663,6 +1665,22 @@ func newGraphCmd(client *copilot.Client) *cobra.Command {
 	}
 }
 
+func newResumeBranchesCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume-branches [sessionID]",
+		Short: "Trace inferred work branches that start from session.resume",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			if err != nil {
+				log.Printf("%v", err)
+				return
+			}
+			showResumeBranches(cmd.Context(), client, sessionID, outputFormat)
+		},
+	}
+}
+
 func newValidateEventsCmd(client *copilot.Client) *cobra.Command {
 	var sampleLimit int
 	cmd := &cobra.Command{
@@ -2245,6 +2263,21 @@ type sessionEventValidationSample struct {
 	SDKError        string `json:"sdkError,omitempty" yaml:"sdkError,omitempty"`
 }
 
+type sessionResumeContinuitySample struct {
+	Row                           int    `json:"row" yaml:"row"`
+	ID                            string `json:"id,omitempty" yaml:"id,omitempty"`
+	Issue                         string `json:"issue" yaml:"issue"`
+	AlreadyInUse                  bool   `json:"alreadyInUse" yaml:"alreadyInUse"`
+	ParentID                      string `json:"parentId,omitempty" yaml:"parentId,omitempty"`
+	ParentType                    string `json:"parentType,omitempty" yaml:"parentType,omitempty"`
+	EventCount                    int    `json:"eventCount" yaml:"eventCount"`
+	RowsBeforeResume              int    `json:"rowsBeforeResume" yaml:"rowsBeforeResume"`
+	EventCountMatches             bool   `json:"eventCountMatches" yaml:"eventCountMatches"`
+	ParentMatchesPreviousShutdown bool   `json:"parentMatchesPreviousShutdown" yaml:"parentMatchesPreviousShutdown"`
+	ParentMatchesPreviousEvent    bool   `json:"parentMatchesPreviousEvent" yaml:"parentMatchesPreviousEvent"`
+	GapSeconds                    int64  `json:"gapSeconds,omitempty" yaml:"gapSeconds,omitempty"`
+}
+
 type sessionEventValidationSummary struct {
 	SessionID                    string                             `json:"sessionId" yaml:"sessionId"`
 	EventsPath                   string                             `json:"eventsPath" yaml:"eventsPath"`
@@ -2258,8 +2291,105 @@ type sessionEventValidationSummary struct {
 	LocalIncompatibleRows        int                                `json:"localIncompatibleRows" yaml:"localIncompatibleRows"`
 	LocalOnlyFallbackRows        int                                `json:"localOnlyFallbackRows" yaml:"localOnlyFallbackRows"`
 	UnknownTypeSDKCompatibleRows int                                `json:"unknownTypeSdkCompatibleRows" yaml:"unknownTypeSdkCompatibleRows"`
+	ResumeRows                   int                                `json:"resumeRows" yaml:"resumeRows"`
+	GracefulResumeRows           int                                `json:"gracefulResumeRows" yaml:"gracefulResumeRows"`
+	ResumeWhileInUseRows         int                                `json:"resumeWhileInUseRows" yaml:"resumeWhileInUseRows"`
+	ResumeFromLastEventRows      int                                `json:"resumeFromLastEventRows" yaml:"resumeFromLastEventRows"`
+	SuspiciousResumeRows         int                                `json:"suspiciousResumeRows" yaml:"suspiciousResumeRows"`
 	IssueCounts                  []sessionEventValidationIssueCount `json:"issueCounts,omitempty" yaml:"issueCounts,omitempty"`
+	ResumeIssueCounts            []sessionEventValidationIssueCount `json:"resumeIssueCounts,omitempty" yaml:"resumeIssueCounts,omitempty"`
 	Samples                      []sessionEventValidationSample     `json:"samples,omitempty" yaml:"samples,omitempty"`
+	ResumeSamples                []sessionResumeContinuitySample    `json:"resumeSamples,omitempty" yaml:"resumeSamples,omitempty"`
+}
+
+type sessionResumeBranchReport struct {
+	SessionID                    string                `json:"sessionId" yaml:"sessionId"`
+	ResumeRows                   int                   `json:"resumeRows" yaml:"resumeRows"`
+	GracefulResumeRows           int                   `json:"gracefulResumeRows" yaml:"gracefulResumeRows"`
+	ResumeWhileInUseRows         int                   `json:"resumeWhileInUseRows" yaml:"resumeWhileInUseRows"`
+	ResumeFromLastEventRows      int                   `json:"resumeFromLastEventRows" yaml:"resumeFromLastEventRows"`
+	ResumeEventCountMismatchRows int                   `json:"resumeEventCountMismatchRows" yaml:"resumeEventCountMismatchRows"`
+	ResumeParentMismatchRows     int                   `json:"resumeParentMismatchRows" yaml:"resumeParentMismatchRows"`
+	Branches                     []sessionResumeBranch `json:"branches,omitempty" yaml:"branches,omitempty"`
+}
+
+type sessionResumeBranch struct {
+	ResumeRow               int        `json:"resumeRow" yaml:"resumeRow"`
+	ResumeID                string     `json:"resumeId,omitempty" yaml:"resumeId,omitempty"`
+	ResumeTime              time.Time  `json:"resumeTime" yaml:"resumeTime"`
+	Kind                    string     `json:"kind" yaml:"kind"`
+	AlreadyInUse            bool       `json:"alreadyInUse" yaml:"alreadyInUse"`
+	ParentID                string     `json:"parentId,omitempty" yaml:"parentId,omitempty"`
+	ParentType              string     `json:"parentType,omitempty" yaml:"parentType,omitempty"`
+	EventCount              int        `json:"eventCount" yaml:"eventCount"`
+	RowsBeforeResume        int        `json:"rowsBeforeResume" yaml:"rowsBeforeResume"`
+	EventCountDelta         int        `json:"eventCountDelta" yaml:"eventCountDelta"`
+	GapSeconds              int64      `json:"gapSeconds,omitempty" yaml:"gapSeconds,omitempty"`
+	NextResumeRow           int        `json:"nextResumeRow,omitempty" yaml:"nextResumeRow,omitempty"`
+	NextShutdownRow         int        `json:"nextShutdownRow,omitempty" yaml:"nextShutdownRow,omitempty"`
+	ActiveInteractionIDs    []string   `json:"activeInteractionIds,omitempty" yaml:"activeInteractionIds,omitempty"`
+	SeedReason              string     `json:"seedReason,omitempty" yaml:"seedReason,omitempty"`
+	BranchInteractionIDs    []string   `json:"branchInteractionIds,omitempty" yaml:"branchInteractionIds,omitempty"`
+	CompetingInteractionIDs []string   `json:"competingInteractionIds,omitempty" yaml:"competingInteractionIds,omitempty"`
+	FirstInteractionRow     int        `json:"firstInteractionRow,omitempty" yaml:"firstInteractionRow,omitempty"`
+	LastInteractionRow      int        `json:"lastInteractionRow,omitempty" yaml:"lastInteractionRow,omitempty"`
+	LastInteractionTime     *time.Time `json:"lastInteractionTime,omitempty" yaml:"lastInteractionTime,omitempty"`
+	LastEventType           string     `json:"lastEventType,omitempty" yaml:"lastEventType,omitempty"`
+	Duration                string     `json:"duration,omitempty" yaml:"duration,omitempty"`
+	EventRows               int        `json:"eventRows,omitempty" yaml:"eventRows,omitempty"`
+	UserMessages            int        `json:"userMessages,omitempty" yaml:"userMessages,omitempty"`
+	AssistantMessages       int        `json:"assistantMessages,omitempty" yaml:"assistantMessages,omitempty"`
+	Turns                   int        `json:"turns,omitempty" yaml:"turns,omitempty"`
+	ToolCalls               int        `json:"toolCalls,omitempty" yaml:"toolCalls,omitempty"`
+	Models                  []string   `json:"models,omitempty" yaml:"models,omitempty"`
+	FirstUserEventID        string     `json:"firstUserEventId,omitempty" yaml:"firstUserEventId,omitempty"`
+	FirstUserText           string     `json:"firstUserText,omitempty" yaml:"firstUserText,omitempty"`
+	ContinuedPastNextResume bool       `json:"continuedPastNextResume,omitempty" yaml:"continuedPastNextResume,omitempty"`
+	ReachedShutdown         bool       `json:"reachedShutdown,omitempty" yaml:"reachedShutdown,omitempty"`
+	OpenAtLogEnd            bool       `json:"openAtLogEnd,omitempty" yaml:"openAtLogEnd,omitempty"`
+	Confidence              string     `json:"confidence" yaml:"confidence"`
+}
+
+type sessionResumePoint struct {
+	ResumeRow                     int
+	ResumeEvent                   *sessionEvent
+	Kind                          string
+	AlreadyInUse                  bool
+	ParentType                    string
+	EventCount                    int
+	RowsBeforeResume              int
+	EventCountDelta               int
+	GapSeconds                    int64
+	ParentMatchesPreviousShutdown bool
+	ParentMatchesPreviousEvent    bool
+}
+
+type sessionInteractionTrace struct {
+	InteractionID     string
+	FirstRow          int
+	FirstTime         time.Time
+	FirstType         string
+	LastRow           int
+	LastTime          time.Time
+	LastType          string
+	EventRows         int
+	UserMessages      int
+	AssistantMessages int
+	Turns             int
+	ToolCalls         int
+	FirstUserRow      int
+	FirstUserEventID  string
+	FirstUserText     string
+	HasOpenTurn       bool
+	modelSet          map[string]struct{}
+	Models            []string
+}
+
+type sessionEventValidationRowRef struct {
+	Row       int
+	ID        string
+	Type      string
+	Timestamp time.Time
 }
 
 // Mirrors the generated SessionEventType constants so validator output can tell
@@ -2670,6 +2800,431 @@ func sessionEventValidationIssue(knownType bool, sdkCompatible bool, localCompat
 	}
 }
 
+func sessionResumeContinuityIssue(eventCountMatches bool, parentMatchesPreviousShutdown bool, parentMatchesPreviousEvent bool, alreadyInUse bool) string {
+	switch {
+	case !eventCountMatches:
+		return "resume-event-count-mismatch"
+	case parentMatchesPreviousShutdown:
+		return ""
+	case parentMatchesPreviousEvent && alreadyInUse:
+		return "resume-while-in-use"
+	case parentMatchesPreviousEvent:
+		return "resume-from-last-event"
+	default:
+		return "resume-parent-mismatch"
+	}
+}
+
+func buildResumeContinuityPoints(events []*sessionEvent) []sessionResumePoint {
+	if len(events) == 0 {
+		return nil
+	}
+
+	eventMap := make(map[string]*sessionEvent, len(events))
+	for _, ev := range events {
+		if ev.ID != "" {
+			eventMap[ev.ID] = ev
+		}
+	}
+
+	points := make([]sessionResumePoint, 0)
+	var previousShutdown *sessionEvent
+	for i, ev := range events {
+		if ev.sessionEventType() == copilot.SessionEventTypeSessionShutdown {
+			previousShutdown = ev
+			continue
+		}
+		if ev.sessionEventType() != copilot.SessionEventTypeSessionResume {
+			continue
+		}
+
+		rowsBeforeResume := i
+		eventCountValue, _ := scalarInt64(ev.Data["eventCount"])
+		eventCount := int(eventCountValue)
+		alreadyInUse := dataBool(ev.Data, "alreadyInUse")
+		var previousEvent *sessionEvent
+		if i > 0 {
+			previousEvent = events[i-1]
+		}
+
+		parentType := ""
+		if parent := eventMap[ev.ParentID]; parent != nil {
+			parentType = parent.Type
+		}
+		parentMatchesPreviousShutdown := previousShutdown != nil && ev.ParentID != "" && ev.ParentID == previousShutdown.ID
+		parentMatchesPreviousEvent := previousEvent != nil && ev.ParentID != "" && ev.ParentID == previousEvent.ID
+		eventCountMatches := eventCount == rowsBeforeResume
+		issue := sessionResumeContinuityIssue(eventCountMatches, parentMatchesPreviousShutdown, parentMatchesPreviousEvent, alreadyInUse)
+		kind := "graceful"
+		if issue != "" {
+			kind = issue
+		}
+
+		var gapSeconds int64
+		if previousEvent != nil {
+			gapSeconds = int64(ev.Timestamp.Sub(previousEvent.Timestamp).Round(time.Second) / time.Second)
+			if gapSeconds < 0 {
+				gapSeconds = 0
+			}
+		}
+
+		points = append(points, sessionResumePoint{
+			ResumeRow:                     i + 1,
+			ResumeEvent:                   ev,
+			Kind:                          kind,
+			AlreadyInUse:                  alreadyInUse,
+			ParentType:                    parentType,
+			EventCount:                    eventCount,
+			RowsBeforeResume:              rowsBeforeResume,
+			EventCountDelta:               eventCount - rowsBeforeResume,
+			GapSeconds:                    gapSeconds,
+			ParentMatchesPreviousShutdown: parentMatchesPreviousShutdown,
+			ParentMatchesPreviousEvent:    parentMatchesPreviousEvent,
+		})
+	}
+
+	return points
+}
+
+func activeInteractionIDsBeforeRow(events []*sessionEvent, row int) []string {
+	if row <= 1 || len(events) == 0 {
+		return nil
+	}
+
+	active := make(map[string]struct{})
+	openTurnsByID := make(map[string][]string)
+	limit := row - 1
+	if limit > len(events) {
+		limit = len(events)
+	}
+	for i := 0; i < limit; i++ {
+		ev := events[i]
+		switch ev.sessionEventType() {
+		case copilot.SessionEventTypeSessionStart, copilot.SessionEventTypeSessionResume, copilot.SessionEventTypeSessionShutdown:
+			openTurnsByID = make(map[string][]string)
+		case copilot.SessionEventTypeAssistantTurnStart:
+			turnID := dataString(ev.Data, "turnId")
+			if turnID == "" {
+				continue
+			}
+			openTurnsByID[turnID] = append(openTurnsByID[turnID], dataString(ev.Data, "interactionId"))
+		case copilot.SessionEventTypeAssistantTurnEnd:
+			turnID := dataString(ev.Data, "turnId")
+			queue := openTurnsByID[turnID]
+			if len(queue) == 0 {
+				continue
+			}
+			if len(queue) == 1 {
+				delete(openTurnsByID, turnID)
+			} else {
+				openTurnsByID[turnID] = queue[1:]
+			}
+		}
+	}
+	for _, queue := range openTurnsByID {
+		for _, interactionID := range queue {
+			if interactionID != "" {
+				active[interactionID] = struct{}{}
+			}
+		}
+	}
+	return sortedStringsFromSet(active)
+}
+
+func nextEventRowOfType(events []*sessionEvent, startRow int, eventType copilot.SessionEventType) int {
+	if startRow < 0 {
+		startRow = 0
+	}
+	for i := startRow; i < len(events); i++ {
+		if events[i].sessionEventType() == eventType {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func buildInteractionTraces(ctx *historyRenderContext, toolSpans []*sessionToolSpan) map[string]*sessionInteractionTrace {
+	traces := make(map[string]*sessionInteractionTrace)
+	for i, ev := range ctx.events {
+		switch ev.sessionEventType() {
+		case copilot.SessionEventTypeSessionStart, copilot.SessionEventTypeSessionResume, copilot.SessionEventTypeSessionShutdown:
+			continue
+		}
+		interactionID := resolveHistoryInteractionID(ctx, ev)
+		if interactionID == "" {
+			continue
+		}
+		trace := traces[interactionID]
+		if trace == nil {
+			trace = &sessionInteractionTrace{
+				InteractionID: interactionID,
+				modelSet:      make(map[string]struct{}),
+			}
+			traces[interactionID] = trace
+		}
+
+		row := i + 1
+		if trace.FirstRow == 0 || row < trace.FirstRow {
+			trace.FirstRow = row
+			trace.FirstTime = ev.Timestamp
+			trace.FirstType = ev.Type
+		}
+		if row >= trace.LastRow {
+			trace.LastRow = row
+			trace.LastTime = ev.Timestamp
+			trace.LastType = ev.Type
+		}
+		trace.EventRows++
+
+		switch ev.sessionEventType() {
+		case copilot.SessionEventTypeUserMessage:
+			trace.UserMessages++
+			if trace.FirstUserRow == 0 {
+				trace.FirstUserRow = row
+				trace.FirstUserEventID = ev.ID
+				trace.FirstUserText = eventText(ev.Data)
+			}
+		case copilot.SessionEventTypeAssistantMessage:
+			trace.AssistantMessages++
+		}
+	}
+
+	for _, turn := range ctx.turns {
+		if turn == nil || turn.InteractionID == "" {
+			continue
+		}
+		trace := traces[turn.InteractionID]
+		if trace == nil {
+			trace = &sessionInteractionTrace{
+				InteractionID: turn.InteractionID,
+				modelSet:      make(map[string]struct{}),
+			}
+			traces[turn.InteractionID] = trace
+		}
+		trace.Turns++
+		if turn.State == "Open" {
+			trace.HasOpenTurn = true
+		}
+	}
+
+	for _, span := range toolSpans {
+		if span == nil || span.InteractionID == "" {
+			continue
+		}
+		trace := traces[span.InteractionID]
+		if trace == nil {
+			trace = &sessionInteractionTrace{
+				InteractionID: span.InteractionID,
+				modelSet:      make(map[string]struct{}),
+			}
+			traces[span.InteractionID] = trace
+		}
+		trace.ToolCalls++
+		if span.Model != "" {
+			trace.modelSet[span.Model] = struct{}{}
+		}
+	}
+
+	for _, trace := range traces {
+		trace.Models = sortedStringsFromSet(trace.modelSet)
+	}
+
+	return traces
+}
+
+func sortedInteractionTraces(traces map[string]*sessionInteractionTrace) []*sessionInteractionTrace {
+	if len(traces) == 0 {
+		return nil
+	}
+	sorted := make([]*sessionInteractionTrace, 0, len(traces))
+	for _, trace := range traces {
+		if trace != nil {
+			sorted = append(sorted, trace)
+		}
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].FirstRow != sorted[j].FirstRow {
+			return sorted[i].FirstRow < sorted[j].FirstRow
+		}
+		return sorted[i].InteractionID < sorted[j].InteractionID
+	})
+	return sorted
+}
+
+func sessionResumeBranchConfidence(kind string, seedReason string, activeCount int, competingCount int) string {
+	if seedReason == "" || seedReason == "no-interaction" || seedReason == "continued-open-interaction" {
+		return "low"
+	}
+	if kind == "resume-event-count-mismatch" || kind == "resume-parent-mismatch" {
+		if activeCount == 0 && competingCount == 0 {
+			return "medium"
+		}
+		return "low"
+	}
+	if activeCount == 0 && competingCount == 0 {
+		return "high"
+	}
+	return "medium"
+}
+
+func buildSessionResumeBranchReport(sessionID string, events []*sessionEvent) (*sessionResumeBranchReport, error) {
+	if len(events) == 0 {
+		return nil, fmt.Errorf("no parsable events found")
+	}
+
+	ctx := buildHistoryRenderContext(events)
+	toolSpans, _ := buildSessionToolSpans(ctx)
+	traces := buildInteractionTraces(ctx, toolSpans)
+	sortedTraces := sortedInteractionTraces(traces)
+	points := buildResumeContinuityPoints(events)
+
+	report := &sessionResumeBranchReport{
+		SessionID:  sessionID,
+		ResumeRows: len(points),
+	}
+	for _, point := range points {
+		switch point.Kind {
+		case "graceful":
+			report.GracefulResumeRows++
+		case "resume-while-in-use":
+			report.ResumeWhileInUseRows++
+		case "resume-from-last-event":
+			report.ResumeFromLastEventRows++
+		case "resume-event-count-mismatch":
+			report.ResumeEventCountMismatchRows++
+		case "resume-parent-mismatch":
+			report.ResumeParentMismatchRows++
+		}
+	}
+
+	for idx, point := range points {
+		nextResumeRow := 0
+		if idx+1 < len(points) {
+			nextResumeRow = points[idx+1].ResumeRow
+		}
+		nextShutdownRow := nextEventRowOfType(events, point.ResumeRow, copilot.SessionEventTypeSessionShutdown)
+		searchLimitRow := len(events) + 1
+		if nextResumeRow > 0 && nextResumeRow < searchLimitRow {
+			searchLimitRow = nextResumeRow
+		}
+		if nextShutdownRow > 0 && nextShutdownRow < searchLimitRow {
+			searchLimitRow = nextShutdownRow
+		}
+
+		branch := sessionResumeBranch{
+			ResumeRow:            point.ResumeRow,
+			ResumeID:             point.ResumeEvent.ID,
+			ResumeTime:           point.ResumeEvent.Timestamp,
+			Kind:                 point.Kind,
+			AlreadyInUse:         point.AlreadyInUse,
+			ParentID:             point.ResumeEvent.ParentID,
+			ParentType:           point.ParentType,
+			EventCount:           point.EventCount,
+			RowsBeforeResume:     point.RowsBeforeResume,
+			EventCountDelta:      point.EventCountDelta,
+			GapSeconds:           point.GapSeconds,
+			NextResumeRow:        nextResumeRow,
+			NextShutdownRow:      nextShutdownRow,
+			ActiveInteractionIDs: activeInteractionIDsBeforeRow(events, point.ResumeRow),
+			SeedReason:           "no-interaction",
+			Confidence:           "low",
+		}
+
+		candidates := make([]*sessionInteractionTrace, 0)
+		for _, trace := range sortedTraces {
+			if trace.FirstRow <= point.ResumeRow {
+				continue
+			}
+			if trace.FirstRow >= searchLimitRow {
+				continue
+			}
+			candidates = append(candidates, trace)
+		}
+
+		chain := make([]*sessionInteractionTrace, 0)
+		competing := make([]*sessionInteractionTrace, 0)
+		switch {
+		case len(candidates) > 0:
+			branch.SeedReason = "first-new-interaction"
+			chain = append(chain, candidates[0])
+			currentLastRow := candidates[0].LastRow
+			ambiguous := false
+			for _, candidate := range candidates[1:] {
+				if ambiguous || candidate.FirstRow <= currentLastRow {
+					ambiguous = true
+					competing = append(competing, candidate)
+					continue
+				}
+				chain = append(chain, candidate)
+				if candidate.LastRow > currentLastRow {
+					currentLastRow = candidate.LastRow
+				}
+			}
+		case len(branch.ActiveInteractionIDs) == 1:
+			if trace := traces[branch.ActiveInteractionIDs[0]]; trace != nil {
+				branch.SeedReason = "continued-open-interaction"
+				chain = append(chain, trace)
+			}
+		}
+
+		branchIDs := make([]string, 0, len(chain))
+		competingIDs := make([]string, 0, len(competing))
+		models := make(map[string]struct{})
+		var firstUserTrace *sessionInteractionTrace
+		var lastTrace *sessionInteractionTrace
+		for _, trace := range chain {
+			branchIDs = append(branchIDs, trace.InteractionID)
+			branch.EventRows += trace.EventRows
+			branch.UserMessages += trace.UserMessages
+			branch.AssistantMessages += trace.AssistantMessages
+			branch.Turns += trace.Turns
+			branch.ToolCalls += trace.ToolCalls
+			for _, model := range trace.Models {
+				models[model] = struct{}{}
+			}
+			if branch.FirstInteractionRow == 0 || trace.FirstRow < branch.FirstInteractionRow {
+				branch.FirstInteractionRow = trace.FirstRow
+			}
+			if trace.LastRow > branch.LastInteractionRow {
+				branch.LastInteractionRow = trace.LastRow
+				ts := trace.LastTime
+				branch.LastInteractionTime = &ts
+				branch.LastEventType = trace.LastType
+				lastTrace = trace
+			}
+			if trace.FirstUserRow > 0 && (firstUserTrace == nil || trace.FirstUserRow < firstUserTrace.FirstUserRow) {
+				firstUserTrace = trace
+			}
+		}
+		for _, trace := range competing {
+			competingIDs = append(competingIDs, trace.InteractionID)
+		}
+		branch.BranchInteractionIDs = branchIDs
+		branch.CompetingInteractionIDs = competingIDs
+		branch.Models = sortedStringsFromSet(models)
+		if firstUserTrace != nil {
+			branch.FirstUserEventID = firstUserTrace.FirstUserEventID
+			branch.FirstUserText = firstUserTrace.FirstUserText
+		}
+		if lastTrace != nil && lastTrace.HasOpenTurn && branch.LastInteractionRow == len(events) {
+			branch.OpenAtLogEnd = true
+		}
+		if branch.LastInteractionTime != nil {
+			branch.Duration = branch.LastInteractionTime.Sub(point.ResumeEvent.Timestamp).Round(time.Millisecond).String()
+		}
+		if nextResumeRow > 0 && branch.LastInteractionRow >= nextResumeRow {
+			branch.ContinuedPastNextResume = true
+		}
+		if nextShutdownRow > 0 && branch.LastInteractionRow >= nextShutdownRow {
+			branch.ReachedShutdown = true
+		}
+		branch.Confidence = sessionResumeBranchConfidence(branch.Kind, branch.SeedReason, len(branch.ActiveInteractionIDs), len(branch.CompetingInteractionIDs))
+		report.Branches = append(report.Branches, branch)
+	}
+
+	return report, nil
+}
+
 func validateSessionEvents(sessionID string, sampleLimit int) (*sessionEventValidationSummary, error) {
 	eventsPath := sessionEventsPath(sessionID)
 	if _, err := os.Stat(eventsPath); err != nil {
@@ -2689,10 +3244,17 @@ func validateSessionEventsAtPath(sessionID string, eventsPath string, sampleLimi
 		SampleLimit: sampleLimit,
 	}
 	issueCounts := make(map[string]int)
+	resumeIssueCounts := make(map[string]int)
+	priorEventTypesByID := make(map[string]string)
+	var previousEvent *sessionEventValidationRowRef
+	var previousShutdown *sessionEventValidationRowRef
 
 	if err := visitJSONLRows(eventsPath, func(rowNo int, line []byte, raw map[string]any) error {
+		rowsBeforeCurrent := summary.TotalRows
 		summary.TotalRows++
 
+		id, _ := raw["id"].(string)
+		parentID, _ := raw["parentId"].(string)
 		eventType := rawSessionEventType(raw)
 		knownType := isKnownSDKSessionEventType(eventType)
 		if knownType {
@@ -2724,52 +3286,95 @@ func validateSessionEventsAtPath(sessionID string, eventsPath string, sampleLimi
 			summary.UnknownTypeSDKCompatibleRows++
 		}
 
-		issue := sessionEventValidationIssue(knownType, sdkCompatible, localCompatible)
-		if issue == "" {
-			return nil
-		}
-		issueCounts[issue]++
-		if sampleLimit == 0 || len(summary.Samples) >= sampleLimit {
-			return nil
+		ts, _ := parseSessionTimestamp(raw["timestamp"])
+		if eventType == copilot.SessionEventTypeSessionResume {
+			summary.ResumeRows++
+
+			resumeData, _ := raw["data"].(map[string]any)
+			eventCount, eventCountOK := scalarInt64(resumeData["eventCount"])
+			alreadyInUse := dataBool(resumeData, "alreadyInUse")
+			eventCountMatches := eventCountOK && eventCount == int64(rowsBeforeCurrent)
+			parentMatchesPreviousShutdown := previousShutdown != nil && parentID != "" && parentID == previousShutdown.ID
+			parentMatchesPreviousEvent := previousEvent != nil && parentID != "" && parentID == previousEvent.ID
+			resumeIssue := sessionResumeContinuityIssue(eventCountMatches, parentMatchesPreviousShutdown, parentMatchesPreviousEvent, alreadyInUse)
+			switch resumeIssue {
+			case "":
+				summary.GracefulResumeRows++
+			case "resume-while-in-use":
+				summary.ResumeWhileInUseRows++
+			case "resume-from-last-event":
+				summary.ResumeFromLastEventRows++
+			default:
+				summary.SuspiciousResumeRows++
+			}
+			if resumeIssue != "" {
+				resumeIssueCounts[resumeIssue]++
+				if sampleLimit > 0 && len(summary.ResumeSamples) < sampleLimit {
+					sample := sessionResumeContinuitySample{
+						Row:                           rowNo,
+						ID:                            id,
+						Issue:                         resumeIssue,
+						AlreadyInUse:                  alreadyInUse,
+						ParentID:                      parentID,
+						ParentType:                    priorEventTypesByID[parentID],
+						EventCount:                    int(eventCount),
+						RowsBeforeResume:              rowsBeforeCurrent,
+						EventCountMatches:             eventCountMatches,
+						ParentMatchesPreviousShutdown: parentMatchesPreviousShutdown,
+						ParentMatchesPreviousEvent:    parentMatchesPreviousEvent,
+					}
+					if previousEvent != nil && !previousEvent.Timestamp.IsZero() && !ts.IsZero() {
+						sample.GapSeconds = int64(ts.Sub(previousEvent.Timestamp).Seconds())
+					}
+					summary.ResumeSamples = append(summary.ResumeSamples, sample)
+				}
+			}
 		}
 
-		id, _ := raw["id"].(string)
-		timestampValue := scalarString(raw["timestamp"])
-		if timestampValue != "" {
-			timestampValue = truncateRunes(normalizeInlineText(timestampValue), 48)
+		issue := sessionEventValidationIssue(knownType, sdkCompatible, localCompatible)
+		if issue != "" {
+			issueCounts[issue]++
+			if sampleLimit > 0 && len(summary.Samples) < sampleLimit {
+				timestampValue := scalarString(raw["timestamp"])
+				if timestampValue != "" {
+					timestampValue = truncateRunes(normalizeInlineText(timestampValue), 48)
+				}
+				summary.Samples = append(summary.Samples, sessionEventValidationSample{
+					Row:             rowNo,
+					ID:              id,
+					Type:            string(eventType),
+					SDKKnownType:    knownType,
+					SDKCompatible:   sdkCompatible,
+					LocalCompatible: localCompatible,
+					Issue:           issue,
+					TimestampKind:   jsonValueKind(raw["timestamp"]),
+					TimestampValue:  timestampValue,
+					DataKind:        jsonValueKind(raw["data"]),
+					SDKError:        truncateRunes(normalizeInlineText(sdkError), 160),
+				})
+			}
 		}
-		summary.Samples = append(summary.Samples, sessionEventValidationSample{
-			Row:             rowNo,
-			ID:              id,
-			Type:            string(eventType),
-			SDKKnownType:    knownType,
-			SDKCompatible:   sdkCompatible,
-			LocalCompatible: localCompatible,
-			Issue:           issue,
-			TimestampKind:   jsonValueKind(raw["timestamp"]),
-			TimestampValue:  timestampValue,
-			DataKind:        jsonValueKind(raw["data"]),
-			SDKError:        truncateRunes(normalizeInlineText(sdkError), 160),
-		})
+
+		current := &sessionEventValidationRowRef{
+			Row:       rowNo,
+			ID:        id,
+			Type:      string(eventType),
+			Timestamp: ts,
+		}
+		if id != "" {
+			priorEventTypesByID[id] = current.Type
+		}
+		if eventType == copilot.SessionEventTypeSessionShutdown {
+			previousShutdown = current
+		}
+		previousEvent = current
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 
-	if len(issueCounts) > 0 {
-		issues := make([]string, 0, len(issueCounts))
-		for issue := range issueCounts {
-			issues = append(issues, issue)
-		}
-		sort.Strings(issues)
-		summary.IssueCounts = make([]sessionEventValidationIssueCount, 0, len(issues))
-		for _, issue := range issues {
-			summary.IssueCounts = append(summary.IssueCounts, sessionEventValidationIssueCount{
-				Issue: issue,
-				Rows:  issueCounts[issue],
-			})
-		}
-	}
+	summary.IssueCounts = sortedValidationIssueCounts(issueCounts)
+	summary.ResumeIssueCounts = sortedValidationIssueCounts(resumeIssueCounts)
 
 	return summary, nil
 }
@@ -2800,6 +3405,81 @@ func scalarString(value any) string {
 	default:
 		return ""
 	}
+}
+
+func scalarInt64(value any) (int64, bool) {
+	switch v := value.(type) {
+	case int:
+		return int64(v), true
+	case int8:
+		return int64(v), true
+	case int16:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case int64:
+		return v, true
+	case uint:
+		return int64(v), true
+	case uint8:
+		return int64(v), true
+	case uint16:
+		return int64(v), true
+	case uint32:
+		return int64(v), true
+	case uint64:
+		if v > math.MaxInt64 {
+			return 0, false
+		}
+		return int64(v), true
+	case float32:
+		if math.Trunc(float64(v)) != float64(v) {
+			return 0, false
+		}
+		return int64(v), true
+	case float64:
+		if math.Trunc(v) != v {
+			return 0, false
+		}
+		return int64(v), true
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return i, true
+		}
+		if f, err := v.Float64(); err == nil && math.Trunc(f) == f {
+			return int64(f), true
+		}
+	case string:
+		if v == "" {
+			return 0, false
+		}
+		if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return i, true
+		}
+		if f, err := strconv.ParseFloat(v, 64); err == nil && math.Trunc(f) == f {
+			return int64(f), true
+		}
+	}
+	return 0, false
+}
+
+func sortedValidationIssueCounts(counts map[string]int) []sessionEventValidationIssueCount {
+	if len(counts) == 0 {
+		return nil
+	}
+	issues := make([]string, 0, len(counts))
+	for issue := range counts {
+		issues = append(issues, issue)
+	}
+	sort.Strings(issues)
+	sorted := make([]sessionEventValidationIssueCount, 0, len(issues))
+	for _, issue := range issues {
+		sorted = append(sorted, sessionEventValidationIssueCount{
+			Issue: issue,
+			Rows:  counts[issue],
+		})
+	}
+	return sorted
 }
 
 func nestedDataString(data map[string]any, keys ...string) string {
@@ -3806,6 +4486,211 @@ func sortedStringsFromSet(values map[string]struct{}) []string {
 	return items
 }
 
+func formatShortIDSummary(ids []string) string {
+	if len(ids) == 0 {
+		return "-"
+	}
+	if len(ids) == 1 {
+		return shortID(ids[0])
+	}
+	return fmt.Sprintf("%s (+%d)", shortID(ids[0]), len(ids)-1)
+}
+
+func formatSignedInt(value int) string {
+	if value > 0 {
+		return fmt.Sprintf("+%d", value)
+	}
+	return strconv.Itoa(value)
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func formatAPICostRate(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return render.FormatFloatCompact(*value)
+}
+
+func formatUsageTokenKind(key string) string {
+	base := strings.TrimSuffix(key, "Tokens")
+	if base == "" {
+		base = key
+	}
+	var b strings.Builder
+	for i, r := range base {
+		if i > 0 {
+			prev := rune(base[i-1])
+			if unicode.IsUpper(r) && (unicode.IsLower(prev) || unicode.IsDigit(prev)) {
+				b.WriteByte(' ')
+			} else if unicode.IsDigit(r) && unicode.IsLetter(prev) {
+				b.WriteByte(' ')
+			}
+		}
+		if i == 0 {
+			r = unicode.ToUpper(r)
+		}
+		b.WriteRune(r)
+	}
+	if strings.HasSuffix(key, "Tokens") {
+		b.WriteString(" Tokens")
+	}
+	return b.String()
+}
+
+func addShutdownUsageTokens(stat *analyze.ModelStat, usage map[string]any) {
+	for key, raw := range usage {
+		value, ok := raw.(float64)
+		if !ok {
+			continue
+		}
+		tokens := int64(value)
+		switch key {
+		case "inputTokens":
+			stat.Input += tokens
+		case "cacheReadTokens":
+			stat.CacheRead += tokens
+		case "cacheWriteTokens":
+			stat.CacheWrite += tokens
+		case "outputTokens":
+			stat.Output += tokens
+		default:
+			stat.AddExtraUsage(key, tokens)
+		}
+	}
+}
+
+type statsAPICostDisplayLine struct {
+	Kind     string
+	Tokens   string
+	Rate     string
+	Subtotal string
+}
+
+func buildStatsAPICostDisplayLines(stat *analyze.ModelStat) []statsAPICostDisplayLine {
+	if stat == nil {
+		return nil
+	}
+	estimate := stat.EstimatedAPICost
+	displayedInputTokens := stat.Input
+	if estimate != nil {
+		displayedInputTokens = estimate.UncachedInputTokens
+	} else if stat.CacheRead > 0 && stat.Input >= stat.CacheRead {
+		displayedInputTokens = stat.Input - stat.CacheRead
+	}
+
+	lines := []statsAPICostDisplayLine{{
+		Kind:     "Input Tokens",
+		Tokens:   strconv.FormatInt(displayedInputTokens, 10),
+		Rate:     "-",
+		Subtotal: "-",
+	}}
+	if estimate != nil {
+		lines[0].Rate = render.FormatFloatCompact(estimate.InputUSDPerMTok)
+		lines[0].Subtotal = render.FormatUSD(estimate.InputUSD)
+	}
+
+	if stat.CacheRead > 0 {
+		line := statsAPICostDisplayLine{
+			Kind:     "Cache Read Tokens",
+			Tokens:   strconv.FormatInt(stat.CacheRead, 10),
+			Rate:     "-",
+			Subtotal: "-",
+		}
+		if estimate != nil {
+			line.Rate = formatAPICostRate(estimate.CacheReadUSDPerMTok)
+			if estimate.CacheReadUSDPerMTok != nil {
+				line.Subtotal = render.FormatUSD(estimate.CacheReadUSD)
+			}
+		}
+		lines = append(lines, line)
+	}
+
+	if stat.CacheWrite > 0 {
+		line := statsAPICostDisplayLine{
+			Kind:     "Cache Write Tokens",
+			Tokens:   strconv.FormatInt(stat.CacheWrite, 10),
+			Rate:     "-",
+			Subtotal: "-",
+		}
+		if estimate != nil {
+			line.Rate = formatAPICostRate(estimate.CacheWriteUSDPerMTok)
+			if estimate.CacheWriteUSDPerMTok != nil {
+				line.Subtotal = render.FormatUSD(estimate.CacheWriteUSD)
+			}
+		}
+		lines = append(lines, line)
+	}
+
+	for _, key := range stat.SortedExtraUsageKeys() {
+		lines = append(lines, statsAPICostDisplayLine{
+			Kind:     formatUsageTokenKind(key),
+			Tokens:   strconv.FormatInt(stat.ExtraUsageTokens[key], 10),
+			Rate:     "-",
+			Subtotal: "-",
+		})
+	}
+
+	outputLine := statsAPICostDisplayLine{
+		Kind:     "Output Tokens",
+		Tokens:   strconv.FormatInt(stat.Output, 10),
+		Rate:     "-",
+		Subtotal: "-",
+	}
+	if estimate != nil {
+		outputLine.Rate = render.FormatFloatCompact(estimate.OutputUSDPerMTok)
+		outputLine.Subtotal = render.FormatUSD(estimate.OutputUSD)
+		if containsString(estimate.MissingPriceComponents, "outputTokens") {
+			outputLine.Subtotal = "-"
+		}
+	}
+	lines = append(lines, outputLine)
+
+	return lines
+}
+
+func joinStatsAPICostDisplayLines(lines []statsAPICostDisplayLine, selector func(statsAPICostDisplayLine) string) string {
+	if len(lines) == 0 {
+		return "-"
+	}
+	values := make([]string, 0, len(lines))
+	for _, line := range lines {
+		values = append(values, selector(line))
+	}
+	return strings.Join(values, "\n")
+}
+
+func formatStatsAPICostKinds(stat *analyze.ModelStat) string {
+	return joinStatsAPICostDisplayLines(buildStatsAPICostDisplayLines(stat), func(line statsAPICostDisplayLine) string {
+		return line.Kind
+	})
+}
+
+func formatStatsAPICostTokenValues(stat *analyze.ModelStat) string {
+	return joinStatsAPICostDisplayLines(buildStatsAPICostDisplayLines(stat), func(line statsAPICostDisplayLine) string {
+		return line.Tokens
+	})
+}
+
+func formatStatsAPICostRates(stat *analyze.ModelStat) string {
+	return joinStatsAPICostDisplayLines(buildStatsAPICostDisplayLines(stat), func(line statsAPICostDisplayLine) string {
+		return line.Rate
+	})
+}
+
+func formatStatsAPICostSubtotals(stat *analyze.ModelStat) string {
+	return joinStatsAPICostDisplayLines(buildStatsAPICostDisplayLines(stat), func(line statsAPICostDisplayLine) string {
+		return line.Subtotal
+	})
+}
+
 func sortedNamedCounts(counts map[string]int) []sessionNamedCount {
 	items := make([]sessionNamedCount, 0, len(counts))
 	for name, count := range counts {
@@ -4035,7 +4920,9 @@ func buildTurnWindows(events []*sessionEvent) []*sessionTurnWindow {
 
 		// session.start/session.resume begin a new segment. turnId is only stable
 		// within a segment, so open turn queues reset here instead of assuming
-		// session-global turn numbering across resumes.
+		// session-global turn numbering across resumes. This still applies when
+		// an unclean recovery resumes from the last persisted event instead of a
+		// preceding session.shutdown row.
 		switch ev.sessionEventType() {
 		case copilot.SessionEventTypeSessionStart, copilot.SessionEventTypeSessionResume:
 			segmentNumber++
@@ -4441,6 +5328,11 @@ func showValidateEvents(ctx context.Context, client *copilot.Client, sessionID s
 	summaryTable.Append([]string{"Local-incompatible rows", strconv.Itoa(summary.LocalIncompatibleRows)})
 	summaryTable.Append([]string{"Local-only fallback rows", strconv.Itoa(summary.LocalOnlyFallbackRows)})
 	summaryTable.Append([]string{"Unknown type but SDK-compatible rows", strconv.Itoa(summary.UnknownTypeSDKCompatibleRows)})
+	summaryTable.Append([]string{"Resume rows", strconv.Itoa(summary.ResumeRows)})
+	summaryTable.Append([]string{"Graceful resume rows", strconv.Itoa(summary.GracefulResumeRows)})
+	summaryTable.Append([]string{"Resume-while-in-use rows", strconv.Itoa(summary.ResumeWhileInUseRows)})
+	summaryTable.Append([]string{"Resume-from-last-event rows", strconv.Itoa(summary.ResumeFromLastEventRows)})
+	summaryTable.Append([]string{"Suspicious resume rows", strconv.Itoa(summary.SuspiciousResumeRows)})
 	summaryTable.Render()
 
 	if len(summary.IssueCounts) > 0 {
@@ -4450,6 +5342,15 @@ func showValidateEvents(ctx context.Context, client *copilot.Client, sessionID s
 			issueTable.Append([]string{issue.Issue, strconv.Itoa(issue.Rows)})
 		}
 		issueTable.Render()
+	}
+
+	if len(summary.ResumeIssueCounts) > 0 {
+		fmt.Println("\nResume Continuity:")
+		resumeIssueTable := render.CreateTable([]string{"Issue", "Rows"}, []int{1}, false, false, tableMode)
+		for _, issue := range summary.ResumeIssueCounts {
+			resumeIssueTable.Append([]string{issue.Issue, strconv.Itoa(issue.Rows)})
+		}
+		resumeIssueTable.Render()
 	}
 
 	if len(summary.Samples) > 0 {
@@ -4487,10 +5388,125 @@ func showValidateEvents(ctx context.Context, client *copilot.Client, sessionID s
 		}
 	}
 
+	if len(summary.ResumeSamples) > 0 {
+		fmt.Println("\nResume Samples:")
+		resumeSampleTable := render.CreateTable([]string{"Row", "ID", "Issue", "In Use", "Parent", "Parent Type", "Event Count", "Rows Before", "Count OK", "Prev Shutdown", "Prev Event", "Gap s"}, []int{1, 2, 5}, false, false, tableMode)
+		for _, sample := range summary.ResumeSamples {
+			id := "-"
+			if sample.ID != "" {
+				id = shortID(sample.ID)
+			}
+			parentID := "-"
+			if sample.ParentID != "" {
+				parentID = shortID(sample.ParentID)
+			}
+			parentType := sample.ParentType
+			if parentType == "" {
+				parentType = "-"
+			}
+			gapSeconds := "-"
+			if sample.GapSeconds > 0 {
+				gapSeconds = strconv.FormatInt(sample.GapSeconds, 10)
+			}
+			resumeSampleTable.Append([]string{
+				strconv.Itoa(sample.Row),
+				id,
+				sample.Issue,
+				strconv.FormatBool(sample.AlreadyInUse),
+				parentID,
+				parentType,
+				strconv.Itoa(sample.EventCount),
+				strconv.Itoa(sample.RowsBeforeResume),
+				strconv.FormatBool(sample.EventCountMatches),
+				strconv.FormatBool(sample.ParentMatchesPreviousShutdown),
+				strconv.FormatBool(sample.ParentMatchesPreviousEvent),
+				gapSeconds,
+			})
+		}
+		resumeSampleTable.Render()
+		if summary.SampleLimit > 0 && len(summary.ResumeSamples) >= summary.SampleLimit {
+			fmt.Printf("Showing first %d non-graceful resume rows.\n", summary.SampleLimit)
+		}
+	}
+
 	fmt.Println("\nNotes:")
 	fmt.Println("- 'SDK known' is based on the current generated copilot.SessionEventType constants.")
 	fmt.Println("- 'SDK compatible' means copilot.UnmarshalSessionEvent accepted the original JSONL row as-is.")
 	fmt.Println("- 'Local compatible' means copilot-show's schema-light parser would still retain the event.")
+	fmt.Println("- A graceful resume points parentId at the previous session.shutdown and keeps data.eventCount equal to the prior row count.")
+	fmt.Println("- 'resume-while-in-use' means data.eventCount still matched, parentId pointed at the last persisted event, and data.alreadyInUse was true; this is consistent with another live process already holding the same session.")
+	fmt.Println("- 'resume-from-last-event' means data.eventCount still matched and parentId pointed at the last persisted event without an alreadyInUse signal; this is a weaker heuristic that can indicate crash recovery or another unclean continuation.")
+}
+
+func showResumeBranches(ctx context.Context, client *copilot.Client, sessionID string, format string) {
+	_ = ctx
+	_ = client
+
+	events, err := loadSessionEvents(sessionID)
+	if err != nil {
+		log.Printf("%v", err)
+		return
+	}
+
+	report, err := buildSessionResumeBranchReport(sessionID, events)
+	if err != nil {
+		log.Printf("%v", err)
+		return
+	}
+
+	if format == "yaml" {
+		printYAML(report)
+		return
+	}
+
+	fmt.Printf("--- Resume Branches for Session: %s ---\n", sessionID)
+	summaryTable := render.CreateTable([]string{"Metric", "Value"}, []int{1}, false, false, tableMode)
+	summaryTable.Append([]string{"Resume rows", strconv.Itoa(report.ResumeRows)})
+	summaryTable.Append([]string{"Graceful resume rows", strconv.Itoa(report.GracefulResumeRows)})
+	summaryTable.Append([]string{"Resume-while-in-use rows", strconv.Itoa(report.ResumeWhileInUseRows)})
+	summaryTable.Append([]string{"Resume-from-last-event rows", strconv.Itoa(report.ResumeFromLastEventRows)})
+	summaryTable.Append([]string{"Resume event-count mismatch rows", strconv.Itoa(report.ResumeEventCountMismatchRows)})
+	summaryTable.Append([]string{"Resume parent mismatch rows", strconv.Itoa(report.ResumeParentMismatchRows)})
+	summaryTable.Render()
+
+	if len(report.Branches) == 0 {
+		fmt.Println("\nNo session.resume rows found in the local log.")
+		return
+	}
+
+	fmt.Println("\nInferred Branches:")
+	table := render.CreateTable([]string{"Resume", "Kind", "Delta", "Active", "Branch", "Rows", "Duration", "Users", "Turns", "Tools", "Competing", "Conf"}, []int{0, 2, 3, 6, 7, 8, 9, 10}, false, false, tableMode)
+	for _, branch := range report.Branches {
+		rows := "-"
+		if branch.FirstInteractionRow > 0 && branch.LastInteractionRow > 0 {
+			rows = fmt.Sprintf("%d->%d", branch.FirstInteractionRow, branch.LastInteractionRow)
+		}
+		duration := branch.Duration
+		if duration == "" {
+			duration = "-"
+		}
+		table.Append([]string{
+			strconv.Itoa(branch.ResumeRow),
+			strings.TrimPrefix(branch.Kind, "resume-"),
+			formatSignedInt(branch.EventCountDelta),
+			strconv.Itoa(len(branch.ActiveInteractionIDs)),
+			formatShortIDSummary(branch.BranchInteractionIDs),
+			rows,
+			duration,
+			strconv.Itoa(branch.UserMessages),
+			strconv.Itoa(branch.Turns),
+			strconv.Itoa(branch.ToolCalls),
+			strconv.Itoa(len(branch.CompetingInteractionIDs)),
+			branch.Confidence,
+		})
+	}
+	table.Render()
+
+	fmt.Println("\nNotes:")
+	fmt.Println("- Branches are inferred from interaction IDs first seen after each session.resume, then extended only while later new interactions stay non-overlapping.")
+	fmt.Println("- When another new interaction begins before the current inferred chain closes, later ownership becomes ambiguous and moves to 'Competing'.")
+	fmt.Println("- 'Delta' is data.eventCount - rows_before_resume. Stable +1 rows can be legacy behavior, so mismatch alone does not prove corruption.")
+	fmt.Println("- Use `-f yaml` to inspect parent types, competing interaction IDs, last event types, models, and the first user message attached to each inferred branch.")
 }
 
 func showTurnsV2(sessionID string, format string) {
@@ -4661,14 +5677,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 								s.Cost += cost
 							}
 							if usage, ok := mv["usage"].(map[string]any); ok {
-								in, _ := usage["inputTokens"].(float64)
-								cacheRead, _ := usage["cacheReadTokens"].(float64)
-								cacheWrite, _ := usage["cacheWriteTokens"].(float64)
-								out, _ := usage["outputTokens"].(float64)
-								s.Input += int64(in)
-								s.CacheRead += int64(cacheRead)
-								s.CacheWrite += int64(cacheWrite)
-								s.Output += int64(out)
+								addShutdownUsageTokens(s, usage)
 							}
 						}
 					}
@@ -4699,6 +5708,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 	var modelsWithoutTokenUsage []string
 	hasCacheReadTokens := false
 	hasCacheWriteTokens := false
+	hasExtraUsageTokens := false
 
 	var models []string
 	for m := range stats {
@@ -4715,11 +5725,14 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 		if s.CacheWrite > 0 {
 			hasCacheWriteTokens = true
 		}
+		if len(s.SortedExtraUsageKeys()) > 0 {
+			hasExtraUsageTokens = true
+		}
 		if !showAPICosts {
 			continue
 		}
 		switch {
-		case s.Input == 0 && s.CacheRead == 0 && s.CacheWrite == 0 && s.Output == 0:
+		case !s.HasTokenUsage():
 			modelsWithoutTokenUsage = append(modelsWithoutTokenUsage, model)
 		default:
 			s.EstimatedAPICost = analyze.EstimateAPICostWithOverrides(model, s, apiPricingOverrides)
@@ -4759,6 +5772,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 				apiPricingAssumption,
 				"Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.",
 				"Rows are still shown when a model lacks API pricing; those rows keep request and token counts, while API totals become lower bounds.",
+				"Shutdown `inputTokens` are treated as total input that can already include `cacheReadTokens`; the estimate prices uncached input as `max(inputTokens - cacheReadTokens, 0)` and prices cache reads separately.",
 				"OpenAI and Gemini pricing use standard short-context tiers; long-context, regional, storage, and batch adjustments are not modeled.",
 				"Anthropic cache reads and Gemini context-cache reads use published cached-input rates; cache writes and storage are not priced because duration is not persisted in session logs.",
 				"Active session tails without session.shutdown contribute request counts but not token-based costs.",
@@ -4786,20 +5800,28 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 
 	totalCostUSD := float64(totalPremiumRequests) * 0.04
 
-	header := []string{"Model", "Requests", "Premium Requests (Cost)", "Input Tokens"}
-	if showAPICosts && hasCacheReadTokens {
-		header = append(header, "Cache Read Tokens")
-	}
-	if showAPICosts && hasCacheWriteTokens {
-		header = append(header, "Cache Write Tokens")
-	}
-	header = append(header, "Output Tokens", "Est. Overage Cost")
-	if showAPICosts {
-		header = append(header, "Est. API Cost")
-	}
-	var rightAlignedCols []int
-	for i := 1; i < len(header); i++ {
-		rightAlignedCols = append(rightAlignedCols, i)
+	header := []string{"Model", "Req.", "PR"}
+	rightAlignedCols := []int{1, 2}
+	if showAPICosts && uiVersion == uiVersionNew {
+		header = append(header, "Token Kind", "Tokens", "USD/Mtok", "Subtotal", "PR Cost", "API Cost")
+		rightAlignedCols = append(rightAlignedCols, 4, 5, 6, 7, 8)
+	} else {
+		header = append(header, "Input Tokens")
+		rightAlignedCols = append(rightAlignedCols, 3)
+		if showAPICosts && hasCacheReadTokens {
+			header = append(header, "Cache Read Tokens")
+			rightAlignedCols = append(rightAlignedCols, len(header)-1)
+		}
+		if showAPICosts && hasCacheWriteTokens {
+			header = append(header, "Cache Write Tokens")
+			rightAlignedCols = append(rightAlignedCols, len(header)-1)
+		}
+		header = append(header, "Output Tokens", "PR Cost")
+		rightAlignedCols = append(rightAlignedCols, len(header)-2, len(header)-1)
+		if showAPICosts {
+			header = append(header, "API Cost")
+			rightAlignedCols = append(rightAlignedCols, len(header)-1)
+		}
 	}
 	table := render.CreateTable(header, rightAlignedCols, false, false, tableMode)
 
@@ -4813,15 +5835,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 			m,
 			strconv.FormatInt(s.Requests, 10),
 			render.FormatFloatCompact(s.Cost),
-			strconv.FormatInt(s.Input, 10),
 		}
-		if showAPICosts && hasCacheReadTokens {
-			row = append(row, strconv.FormatInt(s.CacheRead, 10))
-		}
-		if showAPICosts && hasCacheWriteTokens {
-			row = append(row, strconv.FormatInt(s.CacheWrite, 10))
-		}
-		row = append(row, strconv.FormatInt(s.Output, 10), overageEst)
 		if showAPICosts {
 			apiCost := "-"
 			if s.EstimatedAPICost != nil {
@@ -4830,7 +5844,29 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 					apiCost = ">= " + apiCost
 				}
 			}
-			row = append(row, apiCost)
+			if uiVersion == uiVersionNew {
+				row = append(
+					row,
+					formatStatsAPICostKinds(s),
+					formatStatsAPICostTokenValues(s),
+					formatStatsAPICostRates(s),
+					formatStatsAPICostSubtotals(s),
+					overageEst,
+					apiCost,
+				)
+			} else {
+				row = append(row, strconv.FormatInt(s.Input, 10))
+				if hasCacheReadTokens {
+					row = append(row, strconv.FormatInt(s.CacheRead, 10))
+				}
+				if hasCacheWriteTokens {
+					row = append(row, strconv.FormatInt(s.CacheWrite, 10))
+				}
+				row = append(row, strconv.FormatInt(s.Output, 10), overageEst)
+				row = append(row, apiCost)
+			}
+		} else {
+			row = append(row, strconv.FormatInt(s.Input, 10), strconv.FormatInt(s.Output, 10), overageEst)
 		}
 		table.Append(row)
 	}
@@ -4849,7 +5885,8 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 	}
 	fmt.Println("Notes:")
 	fmt.Println("- Overage cost uses $0.04 USD per premium request.")
-	fmt.Println("- `Premium Requests (Cost)` can be fractional because model multipliers are preserved from session shutdown metrics.")
+	fmt.Println("- `PR` means premium requests and can be fractional because model multipliers are preserved from session shutdown metrics.")
+	fmt.Println("- `PR Cost` is the hypothetical $0.04-per-PR overage charge; if your usage stays within the premium requests included in your plan, the actual overage billed can still be $0.")
 	if showAPICosts {
 		if !hasActiveAPIPricingOverrides {
 			fmt.Println("- API cost uses built-in public token prices from OpenAI, Anthropic, and Google docs.")
@@ -4857,12 +5894,23 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 			fmt.Printf("- API cost uses built-in public token prices with local YAML overrides from %s.\n", apiPricingOverrides.Path)
 		}
 		fmt.Println("- Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.")
-		fmt.Println("- Models without API pricing still appear in the table; their `Est. API Cost` stays `-`, and the total becomes a lower bound.")
+		fmt.Println("- Models without API pricing still appear in the table; their `API Cost` stays `-`, and the total becomes a lower bound.")
+		if uiVersion == uiVersionNew {
+			fmt.Println("- In the new table, `Input Tokens` shows only the uncached billed portion after subtracting `Cache Read Tokens`; raw shutdown `usage.inputTokens` still remains available in YAML output.")
+		} else {
+			fmt.Println("- `Input Tokens` are taken directly from shutdown `usage.inputTokens`. When `Cache Read Tokens` are present, the estimate treats them as a subset of input and prices only the uncached remainder at the full input-token rate.")
+		}
+		if uiVersion == uiVersionNew {
+			fmt.Println("- The new table lays out `Token Kind`, `Tokens`, `USD/Mtok`, and `Subtotal` as aligned logical rows inside each model row.")
+		}
 		fmt.Println("- `Cache Read Tokens` use published cached-input or context-caching rates when the selected model has a verified read price.")
 		if hasCacheWriteTokens {
 			fmt.Println("- `Cache Write Tokens` are shown separately. If a model lacks a verified write or storage price, its API estimate becomes a lower bound.")
 		} else {
 			fmt.Println("- `Cache Write Tokens` are currently zero in the selected local history, so write pricing did not affect this estimate.")
+		}
+		if hasExtraUsageTokens {
+			fmt.Println("- Additional shutdown `usage` keys are shown as extra token rows in the new table. They currently have no built-in API pricing, so affected model totals remain lower bounds until explicit support is added.")
 		}
 		fmt.Println("- OpenAI and Gemini estimates use standard short-context tiers. Long-context, regional, fast-mode, batch, and tool-call surcharges are not modeled.")
 		fmt.Println("- Active session tails without `session.shutdown` can contribute request counts, but not token-based API cost estimates.")
