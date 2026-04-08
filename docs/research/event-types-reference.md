@@ -35,6 +35,15 @@ For per-event field semantics, the most precise upstream references are currentl
 | `skill.invoked` | Skill activation | `name` or `skillName`, `toolCallId` | Useful for understanding orchestration, especially around nested work. |
 | `subagent.started`, `subagent.completed` | Nested agent span boundaries | `toolCallId`, `parentToolCallId`, `agentDisplayName`, `agentType` | These rows are important for control-plane archaeology. Nested work can raise shutdown `requests.count` without increasing `requests.cost`. |
 
+## Capability and remote-control events
+
+| Event types | What they mark | Fields worth keeping | Practical notes |
+| --- | --- | --- | --- |
+| `capabilities.changed` | SDK/CLI capability surface changed mid-session | `data.ui.elicitation` | In `copilot-sdk/go v0.2.1`, this is the new event family that reflects UI capability changes such as elicitation support. It is control-plane state, not a billing unit. |
+| `sampling.requested`, `sampling.completed` | MCP sampling request lifecycle | `serverName`, `mcpRequestId`, `model`, `initiator` | These rows matter when an MCP server asks Copilot CLI to perform model sampling on its behalf. They should be kept separate from top-level user billing rows. |
+| `session.custom_agents_updated` | Custom-agent catalog refresh | `data.agents`, `data.warnings`, `data.errors` | Useful when agent availability changes during a long-running session or after extension reloads. |
+| `session.remote_steerable_changed` | Mission Control remote-steering support changed | `data.remoteSteerable` | Capability flag rather than a user action. |
+
 ## Context and housekeeping events
 
 | Event types | What they mark | Fields worth keeping | Practical notes |

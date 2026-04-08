@@ -486,11 +486,36 @@ func TestDescribeHistoryEventUsesScalarRawPayloadForFutureEvents(t *testing.T) {
 	}
 }
 
+func TestDescribeHistoryEventSessionRemoteSteerableChanged(t *testing.T) {
+	t.Parallel()
+
+	ev := &sessionEvent{
+		Type: string(copilot.SessionEventTypeSessionRemoteSteerableChanged),
+		Data: map[string]any{
+			"remoteSteerable": true,
+		},
+	}
+
+	label, detail, extraLines := describeHistoryEvent(&historyRenderContext{}, ev)
+	if label != "Remote Steering Changed" {
+		t.Fatalf("describeHistoryEvent() label = %q, want %q", label, "Remote Steering Changed")
+	}
+	if detail != "Enabled" {
+		t.Fatalf("describeHistoryEvent() detail = %q, want %q", detail, "Enabled")
+	}
+	if len(extraLines) != 0 {
+		t.Fatalf("describeHistoryEvent() extraLines = %#v, want none", extraLines)
+	}
+}
+
 func TestIsKnownSDKSessionEventType(t *testing.T) {
 	t.Parallel()
 
 	if !isKnownSDKSessionEventType(copilot.SessionEventTypeUserMessage) {
 		t.Fatal("isKnownSDKSessionEventType(user.message) = false, want true")
+	}
+	if !isKnownSDKSessionEventType(copilot.SessionEventTypeSamplingRequested) {
+		t.Fatal("isKnownSDKSessionEventType(sampling.requested) = false, want true")
 	}
 	if isKnownSDKSessionEventType(copilot.SessionEventType("session.future_notice")) {
 		t.Fatal("isKnownSDKSessionEventType(session.future_notice) = true, want false")

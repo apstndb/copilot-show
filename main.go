@@ -2405,6 +2405,7 @@ var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
 	copilot.SessionEventTypeAssistantTurnEnd:              {},
 	copilot.SessionEventTypeAssistantTurnStart:            {},
 	copilot.SessionEventTypeAssistantUsage:                {},
+	copilot.SessionEventTypeCapabilitiesChanged:           {},
 	copilot.SessionEventTypeCommandCompleted:              {},
 	copilot.SessionEventTypeCommandExecute:                {},
 	copilot.SessionEventTypeCommandQueued:                 {},
@@ -2422,10 +2423,13 @@ var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
 	copilot.SessionEventTypePendingMessagesModified:       {},
 	copilot.SessionEventTypePermissionCompleted:           {},
 	copilot.SessionEventTypePermissionRequested:           {},
+	copilot.SessionEventTypeSamplingCompleted:             {},
+	copilot.SessionEventTypeSamplingRequested:             {},
 	copilot.SessionEventTypeSessionBackgroundTasksChanged: {},
 	copilot.SessionEventTypeSessionCompactionComplete:     {},
 	copilot.SessionEventTypeSessionCompactionStart:        {},
 	copilot.SessionEventTypeSessionContextChanged:         {},
+	copilot.SessionEventTypeSessionCustomAgentsUpdated:    {},
 	copilot.SessionEventTypeSessionError:                  {},
 	copilot.SessionEventTypeSessionExtensionsLoaded:       {},
 	copilot.SessionEventTypeSessionHandoff:                {},
@@ -2436,6 +2440,7 @@ var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
 	copilot.SessionEventTypeSessionModeChanged:            {},
 	copilot.SessionEventTypeSessionModelChange:            {},
 	copilot.SessionEventTypeSessionPlanChanged:            {},
+	copilot.SessionEventTypeSessionRemoteSteerableChanged: {},
 	copilot.SessionEventTypeSessionResume:                 {},
 	copilot.SessionEventTypeSessionShutdown:               {},
 	copilot.SessionEventTypeSessionSkillsLoaded:           {},
@@ -4084,6 +4089,84 @@ func describeSessionModelChange(ev *sessionEvent) (string, string, []string) {
 	return "Model Changed", detail, extraLines
 }
 
+func describeCapabilitiesChanged(ev *sessionEvent) (string, string, []string) {
+	if ui := dataMap(ev.Data, "ui"); ui != nil {
+		if elicitation := dataBoolPtr(ui, "elicitation"); elicitation != nil {
+			if *elicitation {
+				return "Capabilities Changed", "UI elicitation enabled", nil
+			}
+			return "Capabilities Changed", "UI elicitation disabled", nil
+		}
+	}
+	return "Capabilities Changed", "", nil
+}
+
+func describeSamplingEvent(label string, ev *sessionEvent) (string, string, []string) {
+	serverName := dataString(ev.Data, "serverName")
+	requestID := dataScalarString(ev.Data, "mcpRequestId")
+	detail := ""
+	switch {
+	case serverName != "" && requestID != "":
+		detail = fmt.Sprintf("%s (%s)", serverName, shortID(requestID))
+	case serverName != "":
+		detail = serverName
+	case requestID != "":
+		detail = "Request " + shortID(requestID)
+	}
+
+	var extraLines []string
+	if model := dataString(ev.Data, "model"); model != "" {
+		extraLines = append(extraLines, "Model: "+model)
+	}
+	if source := dataString(ev.Data, "initiator"); source != "" {
+		extraLines = append(extraLines, "Initiator: "+source)
+	}
+	return label, detail, extraLines
+}
+
+func describeSessionCustomAgentsUpdated(ev *sessionEvent) (string, string, []string) {
+	rawAgents, _ := ev.Data["agents"].([]any)
+	names := make([]string, 0, len(rawAgents))
+	for _, rawAgent := range rawAgents {
+		agent, ok := rawAgent.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := firstNonEmpty(
+			dataString(agent, "displayName"),
+			dataString(agent, "name"),
+			dataString(agent, "id"),
+		)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	detail := fmt.Sprintf("%d agents", len(rawAgents))
+	if len(names) > 0 {
+		detail = fmt.Sprintf("%s: %s", detail, truncateRunes(strings.Join(names, ", "), 120))
+	}
+
+	var extraLines []string
+	if warnings, ok := ev.Data["warnings"].([]any); ok && len(warnings) > 0 {
+		extraLines = append(extraLines, fmt.Sprintf("Warnings: %d", len(warnings)))
+	}
+	if errors, ok := ev.Data["errors"].([]any); ok && len(errors) > 0 {
+		extraLines = append(extraLines, fmt.Sprintf("Errors: %d", len(errors)))
+	}
+	return "Custom Agents Updated", detail, extraLines
+}
+
+func describeSessionRemoteSteerableChanged(ev *sessionEvent) (string, string, []string) {
+	if remoteSteerable := dataBoolPtr(ev.Data, "remoteSteerable"); remoteSteerable != nil {
+		if *remoteSteerable {
+			return "Remote Steering Changed", "Enabled", nil
+		}
+		return "Remote Steering Changed", "Disabled", nil
+	}
+	return "Remote Steering Changed", "", nil
+}
+
 func historyEventFamilyLabel(eventType string) string {
 	switch {
 	case strings.HasPrefix(eventType, "assistant."):
@@ -4292,12 +4375,20 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 		return "Session Resume", "", nil
 	case copilot.SessionEventTypeSessionContextChanged:
 		return describeSessionContextChanged(ev)
+	case copilot.SessionEventTypeCapabilitiesChanged:
+		return describeCapabilitiesChanged(ev)
 	case copilot.SessionEventTypeSessionCompactionStart:
 		return "Compaction Start", "", nil
 	case copilot.SessionEventTypeSessionCompactionComplete:
 		return describeSessionCompactionComplete(ev)
 	case copilot.SessionEventTypeSessionModeChanged:
 		return describeSessionModeChanged(ev)
+	case copilot.SessionEventTypeSamplingRequested:
+		return describeSamplingEvent("Sampling Requested", ev)
+	case copilot.SessionEventTypeSamplingCompleted:
+		return describeSamplingEvent("Sampling Completed", ev)
+	case copilot.SessionEventTypeSessionCustomAgentsUpdated:
+		return describeSessionCustomAgentsUpdated(ev)
 	case copilot.SessionEventTypeSessionWorkspaceFileChanged:
 		return describeSessionWorkspaceFileChanged(ev)
 	case copilot.SessionEventTypeToolUserRequested:
@@ -4306,6 +4397,8 @@ func describeHistoryEvent(ctx *historyRenderContext, ev *sessionEvent) (string, 
 		return describeSessionInfo(ev)
 	case copilot.SessionEventTypeSessionModelChange:
 		return describeSessionModelChange(ev)
+	case copilot.SessionEventTypeSessionRemoteSteerableChanged:
+		return describeSessionRemoteSteerableChanged(ev)
 	case copilot.SessionEventTypeAssistantTurnStart:
 		if turn, ok := ctx.turnStartByEventID[ev.ID]; ok {
 			detail := fmt.Sprintf("Turn #%d, Segment %d, Turn ID %s", turn.TurnNumber, turn.SegmentNumber, turn.TurnID)
