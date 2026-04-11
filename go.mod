@@ -3,7 +3,7 @@ module github.com/apstndb/copilot-show
 go 1.26.1
 
 require (
-	github.com/github/copilot-sdk/go v0.2.1
+	github.com/github/copilot-sdk/go v0.2.2
 	github.com/goccy/go-yaml v1.19.2
 	github.com/maruel/natural v1.3.0
 	github.com/olekukonko/tablewriter v1.1.3

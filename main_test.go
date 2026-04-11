@@ -261,12 +261,12 @@ func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
 			Billing: &rpc.Billing{
 				Multiplier: liveDocsMultiplier,
 			},
-			Capabilities: rpc.Capabilities{
-				Limits: rpc.Limits{
+			Capabilities: rpc.ModelCapabilities{
+				Limits: rpc.ModelCapabilitiesLimits{
 					MaxContextWindowTokens: 200000,
 					MaxOutputTokens:        &outputTokens,
 				},
-				Supports: rpc.Supports{
+				Supports: rpc.ModelCapabilitiesSupports{
 					Vision:          &vision,
 					ReasoningEffort: &reasoning,
 				},
@@ -283,8 +283,8 @@ func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
 			Billing: &rpc.Billing{
 				Multiplier: liveOnlyMultiplier,
 			},
-			Capabilities: rpc.Capabilities{
-				Limits: rpc.Limits{
+			Capabilities: rpc.ModelCapabilities{
+				Limits: rpc.ModelCapabilitiesLimits{
 					MaxContextWindowTokens: 100000,
 				},
 			},
@@ -596,6 +596,33 @@ func TestValidateSessionEventsAtPath(t *testing.T) {
 	}
 	if summary.Samples[2].Issue != "known-type-local-only-fallback" || !summary.Samples[2].SDKKnownType {
 		t.Fatalf("Samples[2] = %#v, want known-type local fallback sample", summary.Samples[2])
+	}
+}
+
+func TestSDKUnmarshalSessionEventPreservesUnknownObjectPayload(t *testing.T) {
+	t.Parallel()
+
+	line := []byte(`{"id":"evt-unknown","type":"session.future_notice","timestamp":"2026-03-22T14:32:58Z","data":{"message":"future but object"}}`)
+	ev, err := copilot.UnmarshalSessionEvent(line)
+	if err != nil {
+		t.Fatalf("UnmarshalSessionEvent() error = %v", err)
+	}
+
+	if ev.Type != copilot.SessionEventType("session.future_notice") {
+		t.Fatalf("UnmarshalSessionEvent() type = %q, want %q", ev.Type, "session.future_notice")
+	}
+
+	raw, ok := ev.Data.(*copilot.RawSessionEventData)
+	if !ok {
+		t.Fatalf("UnmarshalSessionEvent() data type = %T, want *copilot.RawSessionEventData", ev.Data)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(raw.Raw, &payload); err != nil {
+		t.Fatalf("json.Unmarshal(raw.Raw) error = %v", err)
+	}
+	if payload["message"] != "future but object" {
+		t.Fatalf("json.Unmarshal(raw.Raw) payload = %#v", payload)
 	}
 }
 

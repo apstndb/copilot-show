@@ -75,6 +75,7 @@ That distinction is the reason `copilot-show graph` tracks both event-parent edg
 The current strategy is intentionally layered:
 
 - keep local JSONL parsing schema-light instead of hard-binding to the current SDK enum set,
+- note that `copilot-sdk/go v0.2.2` now preserves unknown event payloads as `RawSessionEventData`, so "unknown to the current enum set" and "rejected by the SDK parser" are no longer the same question,
 - treat the raw `type` string as authoritative even when the repository does not have a dedicated renderer for it yet,
 - use best-effort history fallbacks that surface common fields like `content`, `message`, `toolName`, `path`, `requestId`, `toolCallId`, and `interactionId`,
 - keep structural joins conservative: `graph` and turn reconstruction still rely only on top-level `interactionId`, `toolCallId`, and `parentToolCallId` fields that are already established locally.
