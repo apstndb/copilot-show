@@ -19,6 +19,7 @@ import (
 	"text/tabwriter"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/apstndb/copilot-show/pkg/analyze"
 	"github.com/apstndb/copilot-show/pkg/modeldocs"
@@ -27,8 +28,6 @@ import (
 	"github.com/github/copilot-sdk/go/rpc"
 	"github.com/goccy/go-yaml"
 	"github.com/maruel/natural"
-	"github.com/olekukonko/tablewriter"
-	"github.com/olekukonko/ts"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -50,6 +49,7 @@ var (
 	version      string
 	outputFormat string
 	tableMode    string
+	tableWidth   int
 	uiVersion    string
 )
 
@@ -193,10 +193,11 @@ func main() {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			switch uiVersion {
 			case uiVersionOld, uiVersionNew:
-				return nil
 			default:
 				return fmt.Errorf("invalid --ui-version %q: expected %q or %q", uiVersion, uiVersionOld, uiVersionNew)
 			}
+			render.SetTableWidthOverride(tableWidth)
+			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			_ = cmd.Help()
@@ -205,6 +206,7 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVarP(&outputFormat, "format", "f", "table", "Output format (table, yaml)")
 	rootCmd.PersistentFlags().StringVar(&tableMode, "table-mode", "default", "Table mode (default, ascii, markdown)")
+	rootCmd.PersistentFlags().IntVar(&tableWidth, "table-width", 0, "Set table width in columns for default/ascii output (0: auto; <0: disable wrapping/width limit; overrides COLUMNS/COLUMN)")
 	rootCmd.PersistentFlags().BoolVar(&showHiddenHelp, "show-hidden", false, "Include hidden commands and hidden flags in help output")
 	rootCmd.PersistentFlags().StringVar(&uiVersion, "ui-version", uiVersionNew, "Hidden UI selector for temporary A/B testing (old, new)")
 	if err := rootCmd.PersistentFlags().MarkHidden("ui-version"); err != nil {
@@ -1263,7 +1265,6 @@ func showWorkspace(ctx context.Context, client *copilot.Client, format string, s
 			return nil
 		}
 
-		table := tablewriter.NewWriter(os.Stdout)
 		if showAll {
 			header := []string{"File Path", "Content (Truncated)"}
 			table := render.CreateTable(header, nil, false, false, tableMode)
@@ -1277,14 +1278,15 @@ func showWorkspace(ctx context.Context, client *copilot.Client, format string, s
 				}
 				table.Append([]string{f.Path, c})
 			}
+			table.Render()
 		} else {
 			header := []string{"File Path"}
 			table := render.CreateTable(header, nil, false, false, tableMode)
 			for _, f := range result {
 				table.Append([]string{f.Path})
 			}
+			table.Render()
 		}
-		table.Render()
 		return nil
 	})
 	if err != nil {
@@ -1531,13 +1533,19 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 		return
 	}
 
-	header := []string{"ID", "CWD", "Start Time", "Modified Time", "Status", "PIDs"}
+	now := time.Now().UTC()
+	header := []string{"ID", "Summary", "CWD", "Age", "Mod", "Status"}
 	table := render.CreateTable(header, nil, false, false, tableMode)
+	wrapWidths := sessionTableWrapWidths(render.TableMaxWidth(tableMode))
 
 	for _, s := range sessions {
 		cwd := "-"
 		if s.Context != nil {
-			cwd = s.Context.Cwd
+			cwd = shortenHomePath(s.Context.Cwd, home)
+		}
+		summary := "-"
+		if s.Summary != nil {
+			summary = normalizeInlineText(*s.Summary)
 		}
 		status := ""
 		if lastID != nil && s.SessionID == *lastID {
@@ -1550,7 +1558,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 			status += "[Foreground]"
 		}
 
-		pids := "-"
+		pids := ""
 		if ps, ok := localStates[s.SessionID]; ok {
 			pids = strings.Join(ps, ", ")
 			// Check if any PID is actually alive
@@ -1576,17 +1584,157 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 				status += "[Running]"
 			}
 		}
+		if pids != "" {
+			if status != "" {
+				status += "\n"
+			}
+			status += pids
+		}
+		if status == "" {
+			status = "-"
+		}
 
 		table.Append([]string{
-			s.SessionID,
-			cwd,
-			s.StartTime,
-			s.ModifiedTime,
-			status,
-			pids,
+			shortenSessionTableID(s.SessionID),
+			wrapSessionTableValue(summary, wrapWidths.summary),
+			wrapSessionTableValue(cwd, wrapWidths.cwd),
+			formatRelativeTimestampShort(s.StartTime, now),
+			formatRelativeTimestampShort(s.ModifiedTime, now),
+			wrapSessionTableValue(status, wrapWidths.status),
 		})
 	}
 	table.Render()
+}
+
+type sessionTableWidths struct {
+	id      int
+	summary int
+	cwd     int
+	status  int
+}
+
+func sessionTableWrapWidths(maxWidth int) sessionTableWidths {
+	if maxWidth <= 0 {
+		return sessionTableWidths{}
+	}
+
+	widths := sessionTableWidths{
+		id:      7,
+		summary: 10,
+		cwd:     8,
+		status:  10,
+	}
+	extra := maxWidth - 57
+	if extra <= 0 {
+		return widths
+	}
+
+	increments := []int{
+		0,
+		extra * 45 / 100,
+		extra * 30 / 100,
+		extra * 25 / 100,
+	}
+	remainder := extra
+	for _, n := range increments {
+		remainder -= n
+	}
+	order := []int{1, 2, 0, 3}
+	for i := 0; i < remainder; i++ {
+		increments[order[i%len(order)]]++
+	}
+
+	widths.id += increments[0]
+	widths.summary += increments[1]
+	widths.cwd += increments[2]
+	widths.status += increments[3]
+	return widths
+}
+
+func shortenSessionTableID(id string) string {
+	if len(id) <= 7 {
+		return id
+	}
+	return id[:7]
+}
+
+func wrapSessionTableValue(s string, width int) string {
+	if width <= 0 || s == "" {
+		return s
+	}
+
+	var lines []string
+	for _, part := range strings.Split(s, "\n") {
+		if part == "" {
+			lines = append(lines, "")
+			continue
+		}
+		for utf8.RuneCountInString(part) > width {
+			runes := []rune(part)
+			lines = append(lines, string(runes[:width]))
+			part = string(runes[width:])
+		}
+		lines = append(lines, part)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func shortenHomePath(path string, home string) string {
+	if path == "" {
+		return "-"
+	}
+	if home == "" {
+		return path
+	}
+	cleanPath := filepath.Clean(path)
+	cleanHome := filepath.Clean(home)
+	if cleanPath == cleanHome {
+		return "~"
+	}
+	prefix := cleanHome + string(os.PathSeparator)
+	if strings.HasPrefix(cleanPath, prefix) {
+		return "~" + string(os.PathSeparator) + strings.TrimPrefix(cleanPath, prefix)
+	}
+	return path
+}
+
+func formatRelativeTimestampShort(raw string, now time.Time) string {
+	if raw == "" {
+		return "-"
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return raw
+	}
+	return formatRelativeDurationShort(now.Sub(ts))
+}
+
+func formatRelativeDurationShort(delta time.Duration) string {
+	future := delta < 0
+	if future {
+		delta = -delta
+	}
+
+	value := "now"
+	switch {
+	case delta < time.Minute:
+		value = "now"
+	case delta < time.Hour:
+		value = fmt.Sprintf("%dm", int(delta/time.Minute))
+	case delta < 24*time.Hour:
+		value = fmt.Sprintf("%dh", int(delta/time.Hour))
+	case delta < 30*24*time.Hour:
+		value = fmt.Sprintf("%dd", int(delta/(24*time.Hour)))
+	case delta < 365*24*time.Hour:
+		value = fmt.Sprintf("%dmo", int(delta/(30*24*time.Hour)))
+	default:
+		value = fmt.Sprintf("%dy", int(delta/(365*24*time.Hour)))
+	}
+
+	if future && value != "now" {
+		return "in " + value
+	}
+	return value
 }
 
 func resolveSessionID(ctx context.Context, client *copilot.Client, args []string) (string, error) {
@@ -6015,12 +6163,4 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 			fmt.Printf("- Models with request counts but no shutdown token usage yet: %s\n", strings.Join(modelsWithoutTokenUsage, ", "))
 		}
 	}
-}
-
-func getTerminalWidth() int {
-	size, err := ts.GetSize()
-	if err != nil || size.Col() <= 0 {
-		return 80 // Default fallback
-	}
-	return size.Col()
 }

@@ -143,6 +143,139 @@ func TestFormatModelDocsLiveMultipliers(t *testing.T) {
 	}
 }
 
+func TestShortenHomePath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		home string
+		want string
+	}{
+		{name: "empty path", path: "", home: "/Users/apstndb", want: "-"},
+		{name: "exact home", path: "/Users/apstndb", home: "/Users/apstndb", want: "~"},
+		{name: "child path", path: "/Users/apstndb/work/copilot-show", home: "/Users/apstndb", want: "~/work/copilot-show"},
+		{name: "outside home", path: "/tmp/copilot-show", home: "/Users/apstndb", want: "/tmp/copilot-show"},
+		{name: "empty home", path: "/Users/apstndb/work/copilot-show", home: "", want: "/Users/apstndb/work/copilot-show"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shortenHomePath(tc.path, tc.home); got != tc.want {
+				t.Fatalf("shortenHomePath(%q, %q) = %q, want %q", tc.path, tc.home, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatRelativeTimestampShort(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: "-"},
+		{name: "invalid", raw: "not-a-time", want: "not-a-time"},
+		{name: "now", raw: now.Format(time.RFC3339), want: "now"},
+		{name: "minutes", raw: now.Add(-45 * time.Minute).Format(time.RFC3339), want: "45m"},
+		{name: "hours", raw: now.Add(-5 * time.Hour).Format(time.RFC3339), want: "5h"},
+		{name: "days", raw: now.Add(-72 * time.Hour).Format(time.RFC3339), want: "3d"},
+		{name: "months", raw: now.Add(-90 * 24 * time.Hour).Format(time.RFC3339), want: "3mo"},
+		{name: "years", raw: now.Add(-800 * 24 * time.Hour).Format(time.RFC3339), want: "2y"},
+		{name: "future", raw: now.Add(2 * time.Hour).Format(time.RFC3339), want: "in 2h"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatRelativeTimestampShort(tc.raw, now); got != tc.want {
+				t.Fatalf("formatRelativeTimestampShort(%q, %s) = %q, want %q", tc.raw, now.Format(time.RFC3339), got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSessionTableWrapWidths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		maxWidth int
+		want     sessionTableWidths
+	}{
+		{name: "disabled", maxWidth: 0, want: sessionTableWidths{}},
+		{name: "narrow baseline", maxWidth: 57, want: sessionTableWidths{id: 7, summary: 10, cwd: 8, status: 10}},
+		{name: "eighty column table", maxWidth: 78, want: sessionTableWidths{id: 7, summary: 20, cwd: 14, status: 15}},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sessionTableWrapWidths(tc.maxWidth); got != tc.want {
+				t.Fatalf("sessionTableWrapWidths(%d) = %+v, want %+v", tc.maxWidth, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShortenSessionTableID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{name: "empty", id: "", want: ""},
+		{name: "short", id: "abc123", want: "abc123"},
+		{name: "exact", id: "80a6555", want: "80a6555"},
+		{name: "uuid", id: "80a65557-c06f-47b7-96cb-78a372de4d9c", want: "80a6555"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shortenSessionTableID(tc.id); got != tc.want {
+				t.Fatalf("shortenSessionTableID(%q) = %q, want %q", tc.id, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWrapSessionTableValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		width int
+		want  string
+	}{
+		{name: "disabled width", value: "abcdef", width: 0, want: "abcdef"},
+		{name: "single line", value: "abcdefghij", width: 4, want: "abcd\nefgh\nij"},
+		{name: "preserve line breaks", value: "abcdef\n12345", width: 3, want: "abc\ndef\n123\n45"},
+		{name: "empty line", value: "abc\n\n123", width: 2, want: "ab\nc\n\n12\n3"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := wrapSessionTableValue(tc.value, tc.width); got != tc.want {
+				t.Fatalf("wrapSessionTableValue(%q, %d) = %q, want %q", tc.value, tc.width, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildCLIFocusedModelDocsSnapshot(t *testing.T) {
 	t.Parallel()
 

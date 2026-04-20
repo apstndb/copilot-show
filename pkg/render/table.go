@@ -2,18 +2,35 @@ package render
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
+	"github.com/olekukonko/ts"
 )
 
 const HistoryEventLabelWidth = 20
 
+var tableWidthOverride int
+
 func CreateTable(header []string, rightAlignedCols []int, hierarchicalMerge bool, rowLine bool, mode string) *tablewriter.Table {
+	return newTable(os.Stdout, header, rightAlignedCols, hierarchicalMerge, rowLine, mode, defaultTableMaxWidth(mode))
+}
+
+func SetTableWidthOverride(width int) {
+	tableWidthOverride = width
+}
+
+func TableMaxWidth(mode string) int {
+	return defaultTableMaxWidth(mode)
+}
+
+func newTable(w io.Writer, header []string, rightAlignedCols []int, hierarchicalMerge bool, rowLine bool, mode string, maxWidth int) *tablewriter.Table {
 	var opts []tablewriter.Option
 
 	if mode == "markdown" {
@@ -34,10 +51,18 @@ func CreateTable(header []string, rightAlignedCols []int, hierarchicalMerge bool
 		}))
 	}
 
-	table := tablewriter.NewTable(os.Stdout, opts...)
+	if maxWidth > 0 {
+		opts = append(opts, tablewriter.WithWidths(tw.CellWidth{Global: maxWidth}))
+	}
+	if shouldUseCompactPadding(mode, len(header), maxWidth) {
+		opts = append(opts, tablewriter.WithPadding(tw.PaddingNone))
+	}
+
+	table := tablewriter.NewTable(w, opts...)
 
 	table.Configure(func(cfg *tablewriter.Config) {
-		cfg.Row.Formatting.AutoWrap = tw.WrapNormal
+		cfg.Row.Formatting.AutoWrap = tw.WrapBreak
+		cfg.Header.Formatting.AutoWrap = tw.WrapBreak
 		cfg.Row.Formatting.AutoFormat = tw.Off
 		cfg.Header.Formatting.AutoFormat = tw.Off
 		cfg.Header.Alignment.Global = tw.AlignLeft
@@ -65,6 +90,60 @@ func CreateTable(header []string, rightAlignedCols []int, hierarchicalMerge bool
 	}
 	table.Header(anyHeader...)
 	return table
+}
+
+func defaultTableMaxWidth(mode string) int {
+	if tableWidthOverride < 0 {
+		return 0
+	}
+	if tableWidthOverride > 0 {
+		return calculateTableMaxWidth(mode, tableWidthOverride)
+	}
+	if width, ok := tableWidthFromEnv(); ok {
+		if width <= 0 {
+			return 0
+		}
+		return calculateTableMaxWidth(mode, width)
+	}
+	if size, err := ts.GetSize(); err == nil {
+		return calculateTableMaxWidth(mode, size.Col())
+	}
+	return 0
+}
+
+func calculateTableMaxWidth(mode string, cols int) int {
+	if mode == "markdown" || cols <= 0 {
+		return 0
+	}
+	if cols <= 2 {
+		return cols
+	}
+	// tablewriter's global width excludes the outer left/right borders from the
+	// rendered width, so reserve those two columns here to make the visible
+	// table width match the requested terminal width.
+	return cols - 2
+}
+
+func shouldUseCompactPadding(mode string, columnCount int, maxWidth int) bool {
+	if mode == "markdown" || columnCount <= 0 || maxWidth <= 0 {
+		return false
+	}
+	return maxWidth <= columnCount*5
+}
+
+func tableWidthFromEnv() (int, bool) {
+	for _, name := range []string{"COLUMNS", "COLUMN"} {
+		raw := strings.TrimSpace(os.Getenv(name))
+		if raw == "" {
+			continue
+		}
+		width, err := strconv.Atoi(raw)
+		if err != nil {
+			continue
+		}
+		return width, true
+	}
+	return 0, false
 }
 
 func FormatFloatCompact(v float64) string {
