@@ -236,6 +236,8 @@ func main() {
 		newPingCmd(client),
 		newStatusCmd(client),
 		newSessionsCmd(client),
+		newSessionAuthCmd(client),
+		newSessionUsageCmd(client),
 		newHistoryCmd(client),
 		newGraphCmd(client),
 		newResumeBranchesCmd(client),
@@ -275,6 +277,18 @@ func withSession(ctx context.Context, client *copilot.Client, fn func(session *c
 	return fn(session)
 }
 
+func withResumedSession(ctx context.Context, client *copilot.Client, sessionID string, fn func(session *copilot.Session) error) error {
+	session, err := client.ResumeSession(ctx, sessionID, &copilot.ResumeSessionConfig{
+		DisableResume:       true,
+		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to resume session %q: %w", sessionID, err)
+	}
+	defer session.Disconnect()
+	return fn(session)
+}
+
 func newQuotaCmd(client *copilot.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "quota",
@@ -286,7 +300,7 @@ func newQuotaCmd(client *copilot.Client) *cobra.Command {
 }
 
 func showQuota(ctx context.Context, client *copilot.Client, format string) {
-	quota, err := client.RPC.Account.GetQuota(ctx)
+	quota, err := client.RPC.Account.GetQuota(ctx, nil)
 	if err != nil {
 		log.Printf("Error fetching quota: %v", err)
 		return
@@ -312,7 +326,7 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 		snap := quota.QuotaSnapshots[k]
 		usagePct := "-"
 		if snap.EntitlementRequests > 0 {
-			usagePct = fmt.Sprintf("%.1f%%", (snap.UsedRequests/snap.EntitlementRequests)*100)
+			usagePct = fmt.Sprintf("%.1f%%", (float64(snap.UsedRequests)/float64(snap.EntitlementRequests))*100)
 		}
 		if snap.ResetDate != nil {
 			t, err := time.Parse(time.RFC3339, *snap.ResetDate)
@@ -339,8 +353,8 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 
 		table.Append([]string{
 			k,
-			fmt.Sprintf("%.0f", snap.EntitlementRequests),
-			fmt.Sprintf("%.0f", snap.UsedRequests),
+			strconv.FormatInt(snap.EntitlementRequests, 10),
+			strconv.FormatInt(snap.UsedRequests, 10),
 			overageVal,
 			usagePct,
 		})
@@ -424,33 +438,32 @@ func newModelsCmd(client *copilot.Client) *cobra.Command {
 }
 
 func showModels(ctx context.Context, client *copilot.Client, format string) {
-	models, err := client.RPC.Models.List(ctx)
+	models, err := client.ListModels(ctx)
 	if err != nil {
 		log.Printf("Error listing models: %v", err)
 		return
 	}
 
-	snapshot := modeldocs.BuildSnapshot(models.Models)
+	snapshot := modeldocs.BuildSnapshot(models)
 	for _, warning := range snapshot.LoadWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
-	modelSnapshot := buildRuntimeModelsSnapshot(models.Models, snapshot)
+	modelSnapshot := buildRuntimeModelsSnapshot(models, snapshot)
 
 	if format == "yaml" {
 		printYAML(modelSnapshot)
 		return
 	}
 
-	header := []string{"ID", "Name", "Multiplier", "Context", "Output", "Prompt", "Vision", "Reasoning", "Efforts", "State"}
-	table := render.CreateTable(header, []int{2, 3, 4, 5}, false, false, tableMode)
+	header := []string{"ID", "Name", "Multiplier", "Context", "Prompt", "Vision", "Reasoning", "Efforts", "State"}
+	table := render.CreateTable(header, []int{2, 3, 4}, false, false, tableMode)
 
 	for _, model := range modelSnapshot.Models {
 		table.Append([]string{
 			model.ID,
 			model.Name,
 			model.MultiplierDisplay,
-			fmt.Sprintf("%.0f", model.MaxContextWindowTokens),
-			formatOptionalTokenLimit(model.MaxOutputTokens),
+			strconv.Itoa(model.MaxContextWindowTokens),
 			formatOptionalTokenLimit(model.MaxPromptTokens),
 			boolYesNo(model.SupportsVision),
 			formatReasoningSupport(model.SupportsReasoning, model.DefaultReasoningEffort),
@@ -489,9 +502,8 @@ type runtimeModelView struct {
 	MultiplierSource          string                        `json:"multiplierSource" yaml:"multiplierSource"`
 	DocsMultipliers           *modeldocs.RequestMultipliers `json:"docsMultipliers,omitempty" yaml:"docsMultipliers,omitempty"`
 	LiveMultiplier            *float64                      `json:"liveMultiplier,omitempty" yaml:"liveMultiplier,omitempty"`
-	MaxContextWindowTokens    float64                       `json:"maxContextWindowTokens" yaml:"maxContextWindowTokens"`
-	MaxOutputTokens           *float64                      `json:"maxOutputTokens,omitempty" yaml:"maxOutputTokens,omitempty"`
-	MaxPromptTokens           *float64                      `json:"maxPromptTokens,omitempty" yaml:"maxPromptTokens,omitempty"`
+	MaxContextWindowTokens    int                           `json:"maxContextWindowTokens" yaml:"maxContextWindowTokens"`
+	MaxPromptTokens           *int                          `json:"maxPromptTokens,omitempty" yaml:"maxPromptTokens,omitempty"`
 	SupportsVision            bool                          `json:"supportsVision" yaml:"supportsVision"`
 	SupportsReasoning         bool                          `json:"supportsReasoning" yaml:"supportsReasoning"`
 	DefaultReasoningEffort    string                        `json:"defaultReasoningEffort,omitempty" yaml:"defaultReasoningEffort,omitempty"`
@@ -499,7 +511,7 @@ type runtimeModelView struct {
 	State                     string                        `json:"state,omitempty" yaml:"state,omitempty"`
 }
 
-func buildRuntimeModelsSnapshot(models []rpc.Model, snapshot modeldocs.Snapshot) runtimeModelsSnapshot {
+func buildRuntimeModelsSnapshot(models []copilot.ModelInfo, snapshot modeldocs.Snapshot) runtimeModelsSnapshot {
 	docsMultipliers := buildDocsMultiplierMap(snapshot.Models)
 	result := runtimeModelsSnapshot{
 		ModelCatalogSource:     snapshot.Sources.ModelMultipliers,
@@ -514,8 +526,8 @@ func buildRuntimeModelsSnapshot(models []rpc.Model, snapshot modeldocs.Snapshot)
 		liveMultiplier := liveBillingMultiplier(model)
 		selectedMultiplier, multiplierSource := selectModelMultiplier(docsMultiplier, liveMultiplier)
 
-		supportsVision := model.Capabilities.Supports.Vision != nil && *model.Capabilities.Supports.Vision
-		supportsReasoning := model.Capabilities.Supports.ReasoningEffort != nil && *model.Capabilities.Supports.ReasoningEffort
+		supportsVision := model.Capabilities.Supports.Vision
+		supportsReasoning := model.Capabilities.Supports.ReasoningEffort
 
 		policyState := ""
 		if model.Policy != nil {
@@ -531,11 +543,10 @@ func buildRuntimeModelsSnapshot(models []rpc.Model, snapshot modeldocs.Snapshot)
 			DocsMultipliers:           cloneModeldocsRequestMultipliers(docsMultiplier),
 			LiveMultiplier:            cloneOptionalFloat(liveMultiplier),
 			MaxContextWindowTokens:    model.Capabilities.Limits.MaxContextWindowTokens,
-			MaxOutputTokens:           cloneOptionalFloat(model.Capabilities.Limits.MaxOutputTokens),
-			MaxPromptTokens:           cloneOptionalFloat(model.Capabilities.Limits.MaxPromptTokens),
+			MaxPromptTokens:           cloneOptionalInt(model.Capabilities.Limits.MaxPromptTokens),
 			SupportsVision:            supportsVision,
 			SupportsReasoning:         supportsReasoning,
-			DefaultReasoningEffort:    derefString(model.DefaultReasoningEffort),
+			DefaultReasoningEffort:    model.DefaultReasoningEffort,
 			SupportedReasoningEfforts: append([]string(nil), model.SupportedReasoningEfforts...),
 			State:                     policyState,
 		})
@@ -555,7 +566,7 @@ func buildDocsMultiplierMap(models []modeldocs.JoinedModel) map[string]*modeldoc
 	return multipliers
 }
 
-func lookupDocsMultipliers(model rpc.Model, multipliers map[string]*modeldocs.RequestMultipliers) *modeldocs.RequestMultipliers {
+func lookupDocsMultipliers(model copilot.ModelInfo, multipliers map[string]*modeldocs.RequestMultipliers) *modeldocs.RequestMultipliers {
 	nameKey := modeldocs.NormalizeModelNameKey(model.Name)
 	if multipliers[nameKey] != nil {
 		return multipliers[nameKey]
@@ -567,7 +578,7 @@ func lookupDocsMultipliers(model rpc.Model, multipliers map[string]*modeldocs.Re
 	return nil
 }
 
-func liveBillingMultiplier(model rpc.Model) *float64 {
+func liveBillingMultiplier(model copilot.ModelInfo) *float64 {
 	if model.Billing == nil {
 		return nil
 	}
@@ -609,18 +620,19 @@ func cloneOptionalFloat(value *float64) *float64 {
 	return &cloned
 }
 
-func derefString(value *string) string {
+func cloneOptionalInt(value *int) *int {
 	if value == nil {
-		return ""
+		return nil
 	}
-	return *value
+	cloned := *value
+	return &cloned
 }
 
-func formatOptionalTokenLimit(value *float64) string {
+func formatOptionalTokenLimit(value *int) string {
 	if value == nil {
 		return "-"
 	}
-	return fmt.Sprintf("%.0f", *value)
+	return strconv.Itoa(*value)
 }
 
 func formatReasoningSupport(supported bool, defaultEffort string) string {
@@ -663,13 +675,13 @@ func newModelDocsCmd(client *copilot.Client) *cobra.Command {
 }
 
 func showModelDocs(ctx context.Context, client *copilot.Client, format string, useLatest bool, showAll bool) {
-	models, err := client.RPC.Models.List(ctx)
+	models, err := client.ListModels(ctx)
 	if err != nil {
 		log.Printf("Error listing live models: %v", err)
 		return
 	}
 
-	snapshot, err := modeldocs.BuildSnapshotWithOptions(ctx, models.Models, modeldocs.SnapshotOptions{PreferLatest: useLatest})
+	snapshot, err := modeldocs.BuildSnapshotWithOptions(ctx, models, modeldocs.SnapshotOptions{PreferLatest: useLatest})
 	if err != nil {
 		log.Printf("Error loading model docs snapshot: %v", err)
 		return
@@ -1127,7 +1139,7 @@ func showMcp(ctx context.Context, client *copilot.Client, format string) {
 		for _, s := range res.Servers {
 			source := ""
 			if s.Source != nil {
-				source = *s.Source
+				source = string(*s.Source)
 			}
 			errMsg := ""
 			if s.Error != nil {
@@ -1171,7 +1183,7 @@ func showMode(ctx context.Context, client *copilot.Client, format string) {
 			return nil
 		}
 
-		fmt.Printf("Current Mode: %s\n", res.Mode)
+		fmt.Printf("Current Mode: %s\n", *res)
 		return nil
 	})
 	if err != nil {
@@ -1233,7 +1245,7 @@ func newWorkspaceCmd(client *copilot.Client) *cobra.Command {
 
 func showWorkspace(ctx context.Context, client *copilot.Client, format string, showAll bool) {
 	err := withSession(ctx, client, func(session *copilot.Session) error {
-		files, err := session.RPC.Workspace.ListFiles(ctx)
+		files, err := session.RPC.Workspaces.ListFiles(ctx)
 		if err != nil {
 			return err
 		}
@@ -1247,7 +1259,7 @@ func showWorkspace(ctx context.Context, client *copilot.Client, format string, s
 		for _, f := range files.Files {
 			var content *string
 			if showAll {
-				c, err := session.RPC.Workspace.ReadFile(ctx, &rpc.SessionWorkspaceReadFileParams{Path: f})
+				c, err := session.RPC.Workspaces.ReadFile(ctx, &rpc.WorkspacesReadFileRequest{Path: f})
 				if err == nil {
 					content = &c.Content
 				}
@@ -1308,7 +1320,7 @@ func newReadFileCmd(client *copilot.Client) *cobra.Command {
 
 func showReadFile(ctx context.Context, client *copilot.Client, path string, format string) {
 	err := withSession(ctx, client, func(session *copilot.Session) error {
-		res, err := session.RPC.Workspace.ReadFile(ctx, &rpc.SessionWorkspaceReadFileParams{Path: path})
+		res, err := session.RPC.Workspaces.ReadFile(ctx, &rpc.WorkspacesReadFileRequest{Path: path})
 		if err != nil {
 			return err
 		}
@@ -1350,8 +1362,8 @@ func showPing(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	fmt.Printf("Message: %s\n", res.Message)
-	fmt.Printf("Protocol Version: %.1f\n", res.ProtocolVersion)
-	fmt.Printf("Timestamp: %.0f\n", res.Timestamp)
+	fmt.Printf("Protocol Version: %d\n", res.ProtocolVersion)
+	fmt.Printf("Timestamp: %d\n", res.Timestamp)
 }
 
 func newCurrentModelCmd(client *copilot.Client) *cobra.Command {
@@ -1477,6 +1489,144 @@ func showStatus(ctx context.Context, client *copilot.Client, format string) {
 		tableAuth.Append([]string{"Host", *auth.Host})
 	}
 	tableAuth.Render()
+}
+
+func newSessionAuthCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "session-auth [sessionID]",
+		Short: "Show per-session authentication status",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			if err != nil {
+				log.Printf("%v", err)
+				return
+			}
+			showSessionAuth(cmd.Context(), client, sessionID, outputFormat)
+		},
+	}
+}
+
+func showSessionAuth(ctx context.Context, client *copilot.Client, sessionID string, format string) {
+	err := withResumedSession(ctx, client, sessionID, func(session *copilot.Session) error {
+		auth, err := session.RPC.Auth.GetStatus(ctx)
+		if err != nil {
+			return err
+		}
+
+		if format == "yaml" {
+			printYAML(struct {
+				SessionID string                 `json:"sessionId" yaml:"sessionId"`
+				Auth      *rpc.SessionAuthStatus `json:"auth" yaml:"auth"`
+			}{
+				SessionID: sessionID,
+				Auth:      auth,
+			})
+			return nil
+		}
+
+		table := render.CreateTable([]string{"Property", "Value"}, nil, false, false, tableMode)
+		table.Append([]string{"Session ID", sessionID})
+		table.Append([]string{"Authenticated", fmt.Sprintf("%v", auth.IsAuthenticated)})
+		table.Append([]string{"Auth Type", formatAuthInfoType(auth.AuthType)})
+		table.Append([]string{"Login", formatOptionalString(auth.Login)})
+		table.Append([]string{"Host", formatOptionalString(auth.Host)})
+		table.Append([]string{"Copilot Plan", formatOptionalString(auth.CopilotPlan)})
+		table.Append([]string{"Status", formatOptionalString(auth.StatusMessage)})
+		table.Render()
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error in session-auth command: %v", err)
+	}
+}
+
+func newSessionUsageCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "session-usage [sessionID]",
+		Short: "Show live per-session usage metrics",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			if err != nil {
+				log.Printf("%v", err)
+				return
+			}
+			showSessionUsage(cmd.Context(), client, sessionID, outputFormat)
+		},
+	}
+}
+
+func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID string, format string) {
+	err := withResumedSession(ctx, client, sessionID, func(session *copilot.Session) error {
+		metrics, err := session.RPC.Usage.GetMetrics(ctx)
+		if err != nil {
+			return err
+		}
+
+		if format == "yaml" {
+			printYAML(struct {
+				SessionID string                     `json:"sessionId" yaml:"sessionId"`
+				Metrics   *rpc.UsageGetMetricsResult `json:"metrics" yaml:"metrics"`
+			}{
+				SessionID: sessionID,
+				Metrics:   metrics,
+			})
+			return nil
+		}
+
+		summary := render.CreateTable([]string{"Property", "Value"}, nil, false, false, tableMode)
+		summary.Append([]string{"Session ID", sessionID})
+		summary.Append([]string{"Current Model", formatOptionalString(metrics.CurrentModel)})
+		summary.Append([]string{"Start Time", formatUnixMillis(metrics.SessionStartTime)})
+		summary.Append([]string{"User Requests", strconv.FormatInt(metrics.TotalUserRequests, 10)})
+		summary.Append([]string{"Premium Cost", render.FormatFloatCompact(metrics.TotalPremiumRequestCost)})
+		summary.Append([]string{"API Duration", formatMilliseconds(metrics.TotalAPIDurationMS)})
+		summary.Append([]string{"Last Call Input", strconv.FormatInt(metrics.LastCallInputTokens, 10)})
+		summary.Append([]string{"Last Call Output", strconv.FormatInt(metrics.LastCallOutputTokens, 10)})
+		summary.Append([]string{"Files Modified", strconv.FormatInt(metrics.CodeChanges.FilesModifiedCount, 10)})
+		summary.Append([]string{"Lines Added", strconv.FormatInt(metrics.CodeChanges.LinesAdded, 10)})
+		summary.Append([]string{"Lines Removed", strconv.FormatInt(metrics.CodeChanges.LinesRemoved, 10)})
+		summary.Render()
+
+		if len(metrics.ModelMetrics) == 0 {
+			return nil
+		}
+
+		fmt.Println()
+		table := render.CreateTable(
+			[]string{"Model", "Requests", "PR Cost", "Input", "Cache Read", "Cache Write", "Output", "Reasoning"},
+			[]int{1, 2, 3, 4, 5, 6, 7},
+			false,
+			false,
+			tableMode,
+		)
+
+		modelIDs := make([]string, 0, len(metrics.ModelMetrics))
+		for modelID := range metrics.ModelMetrics {
+			modelIDs = append(modelIDs, modelID)
+		}
+		sort.Strings(modelIDs)
+
+		for _, modelID := range modelIDs {
+			mm := metrics.ModelMetrics[modelID]
+			table.Append([]string{
+				modelID,
+				strconv.FormatInt(mm.Requests.Count, 10),
+				render.FormatFloatCompact(mm.Requests.Cost),
+				strconv.FormatInt(mm.Usage.InputTokens, 10),
+				strconv.FormatInt(mm.Usage.CacheReadTokens, 10),
+				strconv.FormatInt(mm.Usage.CacheWriteTokens, 10),
+				strconv.FormatInt(mm.Usage.OutputTokens, 10),
+				formatOptionalInt64(mm.Usage.ReasoningTokens),
+			})
+		}
+		table.Render()
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error in session-usage command: %v", err)
+	}
 }
 
 func newSessionsCmd(client *copilot.Client) *cobra.Command {
@@ -1748,6 +1898,41 @@ func resolveSessionID(ctx context.Context, client *copilot.Client, args []string
 		return *last, nil
 	}
 	return "", fmt.Errorf("no session ID provided and no foreground/last session found")
+}
+
+func formatOptionalString(value *string) string {
+	if value == nil || *value == "" {
+		return "-"
+	}
+	return *value
+}
+
+func formatAuthInfoType(value *rpc.AuthInfoType) string {
+	if value == nil {
+		return "-"
+	}
+	return string(*value)
+}
+
+func formatOptionalInt64(value *int64) string {
+	if value == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*value, 10)
+}
+
+func formatUnixMillis(value int64) string {
+	if value <= 0 {
+		return "-"
+	}
+	return time.UnixMilli(value).Local().Format(time.RFC3339)
+}
+
+func formatMilliseconds(value float64) string {
+	if value == 0 {
+		return "0 ms"
+	}
+	return fmt.Sprintf("%.0f ms", value)
 }
 
 func newHistoryCmd(client *copilot.Client) *cobra.Command {
@@ -2044,9 +2229,9 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 
 	// Fetch models to join with usage (Left Join Multiplier)
 	multiplierMap := make(map[string]float64)
-	modelsList, err := client.RPC.Models.List(ctx)
+	modelsList, err := client.ListModels(ctx)
 	if err == nil {
-		for _, m := range modelsList.Models {
+		for _, m := range modelsList {
 			if m.Billing != nil {
 				multiplierMap[analyze.NormalizeModelKey(m.Name)] = m.Billing.Multiplier
 				multiplierMap[analyze.NormalizeModelKey(m.ID)] = m.Billing.Multiplier
@@ -2072,10 +2257,10 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 
 	// Fetch included limit if available (for reference only, as it's for current month)
 	var entitlement float64
-	quotaRes, err := client.RPC.Account.GetQuota(ctx)
+	quotaRes, err := client.RPC.Account.GetQuota(ctx, nil)
 	if err == nil {
 		if snap, ok := quotaRes.QuotaSnapshots["premium_interactions"]; ok {
-			entitlement = snap.EntitlementRequests
+			entitlement = float64(snap.EntitlementRequests)
 		}
 	}
 

@@ -201,6 +201,41 @@ func TestFormatRelativeTimestampShort(t *testing.T) {
 	}
 }
 
+func TestFormatSessionInspectionHelpers(t *testing.T) {
+	t.Parallel()
+
+	authType := rpc.AuthInfoTypeAPIKey
+	reasoning := int64(42)
+
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{name: "optional string nil", got: formatOptionalString(nil), want: "-"},
+		{name: "optional string empty", got: formatOptionalString(strPtr("")), want: "-"},
+		{name: "optional string value", got: formatOptionalString(strPtr("octocat")), want: "octocat"},
+		{name: "auth type nil", got: formatAuthInfoType(nil), want: "-"},
+		{name: "auth type value", got: formatAuthInfoType(&authType), want: "api-key"},
+		{name: "optional int nil", got: formatOptionalInt64(nil), want: "-"},
+		{name: "optional int value", got: formatOptionalInt64(&reasoning), want: "42"},
+		{name: "unix millis zero", got: formatUnixMillis(0), want: "-"},
+		{name: "unix millis value", got: formatUnixMillis(1713441600000), want: time.UnixMilli(1713441600000).Local().Format(time.RFC3339)},
+		{name: "milliseconds zero", got: formatMilliseconds(0), want: "0 ms"},
+		{name: "milliseconds rounded", got: formatMilliseconds(1234.4), want: "1234 ms"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.got != tc.want {
+				t.Fatalf("%s = %q, want %q", tc.name, tc.got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSessionTableWrapWidths(t *testing.T) {
 	t.Parallel()
 
@@ -383,41 +418,40 @@ func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
 	docsFree := 1.0
 	liveDocsMultiplier := 9.0
 	liveOnlyMultiplier := 2.0
-	outputTokens := 4096.0
 	vision := true
 	reasoning := true
 
-	got := buildRuntimeModelsSnapshot([]rpc.Model{
+	got := buildRuntimeModelsSnapshot([]copilot.ModelInfo{
 		{
 			ID:   "claude-haiku-4.5",
 			Name: "Claude Haiku 4.5",
-			Billing: &rpc.Billing{
+			Billing: &copilot.ModelBilling{
 				Multiplier: liveDocsMultiplier,
 			},
-			Capabilities: rpc.ModelCapabilities{
-				Limits: rpc.ModelCapabilitiesLimits{
+			Capabilities: copilot.ModelCapabilities{
+				Limits: copilot.ModelLimits{
 					MaxContextWindowTokens: 200000,
-					MaxOutputTokens:        &outputTokens,
+					MaxPromptTokens:        intPtr(8192),
 				},
-				Supports: rpc.ModelCapabilitiesSupports{
-					Vision:          &vision,
-					ReasoningEffort: &reasoning,
+				Supports: copilot.ModelSupports{
+					Vision:          vision,
+					ReasoningEffort: reasoning,
 				},
 			},
-			DefaultReasoningEffort:    strptr("medium"),
+			DefaultReasoningEffort:    "medium",
 			SupportedReasoningEfforts: []string{"low", "medium", "high"},
-			Policy: &rpc.Policy{
+			Policy: &copilot.ModelPolicy{
 				State: "enabled",
 			},
 		},
 		{
 			ID:   "custom-runtime",
 			Name: "Custom Runtime",
-			Billing: &rpc.Billing{
+			Billing: &copilot.ModelBilling{
 				Multiplier: liveOnlyMultiplier,
 			},
-			Capabilities: rpc.ModelCapabilities{
-				Limits: rpc.ModelCapabilitiesLimits{
+			Capabilities: copilot.ModelCapabilities{
+				Limits: copilot.ModelLimits{
 					MaxContextWindowTokens: 100000,
 				},
 			},
@@ -470,6 +504,14 @@ func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
 }
 
 func strptr(value string) *string {
+	return &value
+}
+
+func intPtr(value int) *int {
+	return &value
+}
+
+func strPtr(value string) *string {
 	return &value
 }
 

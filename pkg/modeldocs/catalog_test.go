@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/github/copilot-sdk/go/rpc"
+	copilot "github.com/github/copilot-sdk/go"
 )
 
 func TestNormalizeModelNameKey(t *testing.T) {
@@ -27,24 +27,24 @@ func TestNormalizeModelNameKey(t *testing.T) {
 }
 
 func TestBuildSnapshotMatchesPreviewNames(t *testing.T) {
-	snapshot, err := BuildSnapshotWithOptions(context.Background(), []rpc.Model{
+	snapshot, err := BuildSnapshotWithOptions(context.Background(), []copilot.ModelInfo{
 		{
 			ID:   "gemini-3-pro-preview",
 			Name: "Gemini 3 Pro (Preview)",
-			Policy: &rpc.Policy{
+			Policy: &copilot.ModelPolicy{
 				State: "enabled",
 			},
-			Billing: &rpc.Billing{
+			Billing: &copilot.ModelBilling{
 				Multiplier: 1,
 			},
 		},
 		{
 			ID:   "claude-sonnet-4",
 			Name: "Claude Sonnet 4",
-			Policy: &rpc.Policy{
+			Policy: &copilot.ModelPolicy{
 				State: "enabled",
 			},
-			Billing: &rpc.Billing{
+			Billing: &copilot.ModelBilling{
 				Multiplier: 1,
 			},
 		},
@@ -142,7 +142,7 @@ func TestBuildSnapshotWithLatestFallback(t *testing.T) {
 		}
 	}
 
-	snapshot, err := buildSnapshotWithFetcher(context.Background(), []rpc.Model{{ID: "gemini-3-pro-preview", Name: "Gemini 3 Pro (Preview)"}}, SnapshotOptions{PreferLatest: true}, fetcher)
+	snapshot, err := buildSnapshotWithFetcher(context.Background(), []copilot.ModelInfo{{ID: "gemini-3-pro-preview", Name: "Gemini 3 Pro (Preview)"}}, SnapshotOptions{PreferLatest: true}, fetcher)
 	if err != nil {
 		t.Fatalf("buildSnapshotWithFetcher() error = %v", err)
 	}

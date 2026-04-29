@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/github/copilot-sdk/go/rpc"
+	copilot "github.com/github/copilot-sdk/go"
 )
 
 const SourceNote = "This catalog uses an embedded snapshot refreshed from github/docs at a recorded commit. Use scripts/update-modeldocs-snapshot.sh to refresh it, or --latest to attempt a fresh github/docs fetch. Treat it as documentation-oriented reference data, not runtime source-of-truth."
@@ -170,7 +170,7 @@ type docsCatalog struct {
 	RetiredModels  []RetiredModel
 }
 
-func BuildSnapshot(live []rpc.Model) Snapshot {
+func BuildSnapshot(live []copilot.ModelInfo) Snapshot {
 	snapshot, err := buildSnapshotWithFetcher(context.Background(), live, SnapshotOptions{}, defaultFetchLatestFile)
 	if err != nil {
 		return Snapshot{
@@ -184,11 +184,11 @@ func BuildSnapshot(live []rpc.Model) Snapshot {
 	return snapshot
 }
 
-func BuildSnapshotWithOptions(ctx context.Context, live []rpc.Model, options SnapshotOptions) (Snapshot, error) {
+func BuildSnapshotWithOptions(ctx context.Context, live []copilot.ModelInfo, options SnapshotOptions) (Snapshot, error) {
 	return buildSnapshotWithFetcher(ctx, live, options, defaultFetchLatestFile)
 }
 
-func buildSnapshotWithFetcher(ctx context.Context, live []rpc.Model, options SnapshotOptions, fetcher latestFileFetcher) (Snapshot, error) {
+func buildSnapshotWithFetcher(ctx context.Context, live []copilot.ModelInfo, options SnapshotOptions, fetcher latestFileFetcher) (Snapshot, error) {
 	catalog, err := loadCatalog(ctx, options, fetcher)
 	if err != nil {
 		return Snapshot{}, err
@@ -196,7 +196,7 @@ func buildSnapshotWithFetcher(ctx context.Context, live []rpc.Model, options Sna
 	return buildSnapshotFromCatalog(live, catalog), nil
 }
 
-func buildSnapshotFromCatalog(live []rpc.Model, catalog docsCatalog) Snapshot {
+func buildSnapshotFromCatalog(live []copilot.ModelInfo, catalog docsCatalog) Snapshot {
 	liveByKey := make(map[string][]LiveMatch)
 	for _, model := range live {
 		match := LiveMatch{ID: model.ID, Name: model.Name}
@@ -288,7 +288,7 @@ func NormalizeModelNameKey(s string) string {
 	return b.String()
 }
 
-func liveModelKeys(model rpc.Model) []string {
+func liveModelKeys(model copilot.ModelInfo) []string {
 	keys := make([]string, 0, 2)
 	nameKey := NormalizeModelNameKey(model.Name)
 	if nameKey != "" {
