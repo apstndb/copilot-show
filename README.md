@@ -26,11 +26,11 @@ mise use -g go:github.com/apstndb/copilot-show@latest
 Run the tool with a subcommand to inspect specific resources.
 
 Available subcommands:
-- `quota`: Show Copilot Premium Interactions usage and entitlement.
+- `quota`: Show Copilot Premium Interactions usage with readable metric names and included limits.
 - `models`: Show models returned by the live Copilot SDK `ListModels` call, with runtime limits, reasoning support, policy state, and `$ I/O` token pricing.
 - `model-docs`: Show docs-backed model metadata from `github/docs`, joined with the live CLI model list. Use `--all` for broader docs-backed fields, or `--visible-only` to hide docs rows your account cannot select right now.
 - `tools`: Show available tools.
-- `usage`: Show billing usage report from GitHub API (`--billing premium-request|ai-credits|auto`), with included limits joined from quota snapshots when available.
+- `usage`: Show billing usage report from GitHub API (`--billing premium-request|ai-credits|auto`), with included limits from quota snapshots and per-model `$ I/O` token pricing from the live SDK model list.
 - `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
 - `turns`: Show turn-by-turn usage statistics for a session.
 
@@ -46,7 +46,7 @@ Use `--show-hidden --help` to include hidden diagnostics commands and hidden fla
 
 ### Quota Information
 
-Shows the current usage and entitlement of Copilot Premium Interactions.
+Shows the current usage and included limits for Copilot quota metrics (for example Premium Interactions or AI Credits when present).
 
 ```bash
 copilot-show quota
@@ -55,20 +55,21 @@ copilot-show quota
 Example Output:
 ```text
 --- Quota Information ---
-┌──────────────────────┬─────────────┬──────┬────────────┬─────────┐
-│ METRIC               │ ENTITLEMENT │ USED │ OVERAGE    │ USAGE % │
-├──────────────────────┼─────────────┼──────┼────────────┼─────────┤
-│ chat                 │           0 │    0 │ Disallowed │ -       │
-│ completions          │           0 │    0 │ Disallowed │ -       │
-│ Premium Interactions │         300 │   65 │ Disallowed │ 21.7%   │
-└──────────────────────┴─────────────┴──────┴────────────┴─────────┘
+┌──────────────────────┬──────────┬──────┬────────────┬─────────┐
+│ METRIC               │ INCLUDED │ USED │ OVERAGE    │ USAGE % │
+├──────────────────────┼──────────┼──────┼────────────┼─────────┤
+│ Chat                 │        0 │    0 │ Disallowed │ -       │
+│ Completions          │        0 │    0 │ Disallowed │ -       │
+│ Premium Interactions │      300 │   65 │ Disallowed │ 21.7%   │
+└──────────────────────┴──────────┴──────┴────────────┴─────────┘
 Last Updated: 2026-03-12T20:41:07+09:00
 
-Plan Reference (Approximate Monthly Entitlement):
-- Copilot Free: 50
-- Copilot Pro / Business: 300
-- Copilot Enterprise: 1,000
+Plan Reference (legacy premium requests, github/docs):
+- Copilot Pro: 300
 - Copilot Pro+: 1,500
+- Copilot Business: 300
+- Copilot Enterprise: 1,000
+- Copilot Max: see github/docs AI credits tables (20,000 total AI credits/month)
 
 Month Progress (UTC): 38.8%
 ...
@@ -146,7 +147,8 @@ copilot-show skills --wrap-long-text
 
 Shows detailed billing usage from the GitHub API (requires `gh` CLI).
 By default it auto-detects billing mode (premium-request vs ai-credits) from quota snapshots and API data; use `--billing premium-request` or `--billing ai-credits` to force a mode.
-Displays grouped results by Period and SKU with subtotals and included limits joined from quota snapshots when available.
+The default table focuses on **Used** credits or premium requests grouped by Period and SKU, with a `$ I/O` column joined from the live Copilot SDK model list (USD per M tokens). Subtotals and included limits from quota snapshots are shown when available.
+Billed quantities and USD amounts remain available in YAML output (`-f yaml`), which also includes `ioSummary` and `tokenPricing` per usage item when a model match is found.
 Supports relative date/month/year by specifying negative values (e.g., `-d -1` for yesterday).
 Multiple periods can be shown with the `--last` flag.
 The `Period` column can be sorted in ascending or descending order with the `--sort-order` flag (default is `desc`).
@@ -154,6 +156,9 @@ The `Period` column can be sorted in ascending or descending order with the `--s
 ```bash
 # Current month (auto-detects billing mode)
 copilot-show usage
+
+# Full billing fields (including billed quantities and USD amounts)
+copilot-show usage -f yaml
 
 # Force premium-request billing
 copilot-show usage --billing premium-request
@@ -241,6 +246,9 @@ The following commands are hidden by default but can be executed by specifying t
 - `mcp-config`: List user-configured MCP servers from Copilot settings
 - `discover`: Unified discovery snapshot from server-scoped SDK APIs (MCP, skills, agents, instructions, and canonical discovery paths)
 - `account`: Show account authentication and registered users
+- `session-metadata [sessionID]`: Show session metadata snapshot (model, mode, workspace)
+- `session-usage [sessionID]`: Show live per-session usage metrics, including AI credits converted from NanoAiu (`TotalNanoAiu` / 10⁹)
+- `session-auth [sessionID]`: Show per-session authentication status
 - `current-model`: Show the currently selected model ID
 - `current-agent`: Show the currently selected agent
 - `mode`: Show the current agent mode
@@ -252,6 +260,8 @@ The following commands are hidden by default but can be executed by specifying t
 - `sessions`: List all sessions with PID information
 - `history [sessionID]`: Show conversation history (from local event logs). The default `--view raw` keeps the event-by-event timeline in fixed `Time / Delta / Event` columns. `--view spans` pairs `tool.execution_start` and `tool.execution_complete` by `toolCallId`, and `--group-by turn` folds `Assistant Turn Start/End` into synthetic turn headers. In this grouped mode, `User` and `Turn` are shown at the same structural level under each interaction, while `Assistant` and `Tool` rows remain nested under the turn. The table also switches to `Time / Span / Structure / Detail` so the hierarchy stays visually aligned.
 - `graph [sessionID]`: Show a graph-oriented summary of local event logs, including `parentId` gaps, direct `interactionId` hubs, and nested `parentToolCallId` groupings.
+- `resume-branches [sessionID]`: Trace inferred work branches that start from `session.resume`
+- `validate-events [sessionID]`: Validate local session events against copilot-sdk generated types
 
 ## History Event Reference
 

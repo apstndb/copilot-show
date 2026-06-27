@@ -5,7 +5,7 @@ This project, `copilot-show`, is a CLI tool designed to explore and expose inter
 ## Project Goal
 Provide a transparent view into Copilot's runtime state, including:
 - Quota usage (Premium Interactions).
-- Available AI models and their specific capabilities (context window, billing multipliers).
+- Available AI models and their specific capabilities (context window, SDK `$ I/O` token pricing; `billingMultiplier` remains YAML-only when present).
 - Built-in tools and their configurations.
 - Session-specific data like current agents, modes, and workspace files.
 

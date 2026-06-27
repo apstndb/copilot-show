@@ -33,7 +33,7 @@ import (
 )
 
 const (
-	copilotSDKClientName = "copilot-show"
+	copilotSDKClientName         = "copilot-show"
 	modelsAPIPricingColumnHeader = "$ I/O"
 
 	uiVersionOld = "old"
@@ -56,13 +56,13 @@ const (
 var (
 	// version can be injected at build time with:
 	//   go build -ldflags "-X main.version=v0.2.0"
-	version              string
-	outputFormat         string
-	tableMode            string
-	tableWidth           int
-	wrapLongText         bool
+	version               string
+	outputFormat          string
+	tableMode             string
+	tableWidth            int
+	wrapLongText          bool
 	enableConfigDiscovery bool
-	uiVersion            string
+	uiVersion             string
 )
 
 func cliVersion() string {
@@ -243,6 +243,7 @@ func main() {
 		newPluginsCmd(client),
 		newMcpCmd(client),
 		newMcpConfigCmd(client),
+		newDiscoverCmd(client),
 		newAccountCmd(client),
 		newCurrentModelCmd(client),
 		newCurrentAgentCmd(client),
@@ -1794,8 +1795,8 @@ type accountSnapshot struct {
 }
 
 type accountUserView struct {
-	Auth      accountAuthView `json:"auth" yaml:"auth"`
-	HasToken  bool            `json:"hasToken,omitempty" yaml:"hasToken,omitempty"`
+	Auth     accountAuthView `json:"auth" yaml:"auth"`
+	HasToken bool            `json:"hasToken,omitempty" yaml:"hasToken,omitempty"`
 }
 
 func showAccount(ctx context.Context, client *copilot.Client, format string) {
@@ -2063,14 +2064,14 @@ func newDiscoverCmd(client *copilot.Client) *cobra.Command {
 }
 
 type discoverSnapshot struct {
-	WorkingDirectory   string                         `json:"workingDirectory" yaml:"workingDirectory"`
-	McpServers         []rpc.DiscoveredMCPServer      `json:"mcpServers" yaml:"mcpServers"`
-	Skills             []rpc.ServerSkill              `json:"skills" yaml:"skills"`
-	Agents             []rpc.AgentInfo                `json:"agents" yaml:"agents"`
-	Instructions       []rpc.InstructionSource        `json:"instructions" yaml:"instructions"`
-	AgentPaths         []rpc.AgentDiscoveryPath       `json:"agentPaths" yaml:"agentPaths"`
-	SkillPaths         []rpc.SkillDiscoveryPath       `json:"skillPaths" yaml:"skillPaths"`
-	InstructionPaths   []rpc.InstructionDiscoveryPath `json:"instructionPaths" yaml:"instructionPaths"`
+	WorkingDirectory string                         `json:"workingDirectory" yaml:"workingDirectory"`
+	McpServers       []rpc.DiscoveredMCPServer      `json:"mcpServers" yaml:"mcpServers"`
+	Skills           []rpc.ServerSkill              `json:"skills" yaml:"skills"`
+	Agents           []rpc.AgentInfo                `json:"agents" yaml:"agents"`
+	Instructions     []rpc.InstructionSource        `json:"instructions" yaml:"instructions"`
+	AgentPaths       []rpc.AgentDiscoveryPath       `json:"agentPaths" yaml:"agentPaths"`
+	SkillPaths       []rpc.SkillDiscoveryPath       `json:"skillPaths" yaml:"skillPaths"`
+	InstructionPaths []rpc.InstructionDiscoveryPath `json:"instructionPaths" yaml:"instructionPaths"`
 }
 
 func collectDiscoverSnapshot(ctx context.Context, client *copilot.Client) (*discoverSnapshot, error) {
@@ -3304,11 +3305,10 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 
 	if format == "yaml" {
-		output := usageReportOutput{BillingMode: resolvedBilling}
-		if len(responses) == 1 {
-			output.Reports = responses[0]
-		} else {
-			output.Reports = responses
+		pricingLookup := usageModelPricingLookupOrWarn(ctx, client)
+		output := usageReportOutput{
+			BillingMode: resolvedBilling,
+			Reports:     enrichUsageResponsesForYAML(responses, pricingLookup),
 		}
 		printYAML(output)
 		return
@@ -3319,69 +3319,29 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		return
 	}
 
-	type usageItem struct {
-		Product          string  `json:"product" yaml:"product"`
-		SKU              string  `json:"sku" yaml:"sku"`
-		Model            string  `json:"model" yaml:"model"`
-		UnitType         string  `json:"unitType" yaml:"unitType"`
-		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
-		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
-		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
-		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
-		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
-		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
-		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
-		Period           string  `json:"-" yaml:"-"` // Not in API, used for sorting
-	}
+	flatItems := flattenUsageResponses(responses)
 
 	// Fetch included limit if available (for reference only, as it's for current month)
 	entitlement := quotaIncludedLimit(quotaRes, resolvedBilling)
 
-	var usageItems []usageItem
-	for _, res := range responses {
-		periodStr := strconv.Itoa(res.TimePeriod.Year)
-		if res.TimePeriod.Month != nil {
-			periodStr = fmt.Sprintf("%d-%02d", res.TimePeriod.Year, *res.TimePeriod.Month)
-			if res.TimePeriod.Day != nil {
-				periodStr = fmt.Sprintf("%d-%02d-%02d", res.TimePeriod.Year, *res.TimePeriod.Month, *res.TimePeriod.Day)
-			}
-		}
-		for _, item := range res.UsageItems {
-			usageItems = append(usageItems, usageItem{
-				Product:          item.Product,
-				SKU:              item.SKU,
-				Model:            item.Model,
-				UnitType:         item.UnitType,
-				PricePerUnit:     item.PricePerUnit,
-				GrossQuantity:    item.GrossQuantity,
-				GrossAmount:      item.GrossAmount,
-				DiscountQuantity: item.DiscountQuantity,
-				DiscountAmount:   item.DiscountAmount,
-				NetQuantity:      item.NetQuantity,
-				NetAmount:        item.NetAmount,
-				Period:           periodStr,
-			})
-		}
-	}
-
 	// Sort usage items: Period (sortOrder), SKU ASC, Model ASC
-	sort.Slice(usageItems, func(i, j int) bool {
-		if usageItems[i].Period != usageItems[j].Period {
+	sort.Slice(flatItems, func(i, j int) bool {
+		if flatItems[i].Period != flatItems[j].Period {
 			if strings.ToLower(sortOrder) == "asc" {
-				return usageItems[i].Period < usageItems[j].Period
+				return flatItems[i].Period < flatItems[j].Period
 			}
-			return usageItems[i].Period > usageItems[j].Period
+			return flatItems[i].Period > flatItems[j].Period
 		}
-		if usageItems[i].SKU != usageItems[j].SKU {
-			return natural.Less(strings.ToLower(usageItems[i].SKU), strings.ToLower(usageItems[j].SKU))
+		if flatItems[i].SKU != flatItems[j].SKU {
+			return natural.Less(strings.ToLower(flatItems[i].SKU), strings.ToLower(flatItems[j].SKU))
 		}
-		return natural.Less(strings.ToLower(usageItems[i].Model), strings.ToLower(usageItems[j].Model))
+		return natural.Less(strings.ToLower(flatItems[i].Model), strings.ToLower(flatItems[j].Model))
 	})
 
 	// Group usage items: Period -> []item
 	var periods []string
-	periodGroups := make(map[string][]usageItem)
-	for _, item := range usageItems {
+	periodGroups := make(map[string][]usageFlatItem)
+	for _, item := range flatItems {
 		found := false
 		for _, p := range periods {
 			if p == item.Period {
@@ -3395,7 +3355,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		periodGroups[item.Period] = append(periodGroups[item.Period], item)
 	}
 
-	if len(usageItems) == 0 {
+	if len(flatItems) == 0 {
 		fmt.Printf("--- %s for %s (%s) ---\n", usageReportTitle(resolvedBilling), username, responses[0].User)
 		if entitlement > 0 {
 			fmt.Printf("%s: %s\n", usageIncludedLabel(resolvedBilling), strconv.FormatFloat(entitlement, 'f', -1, 64))
@@ -3408,18 +3368,16 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	if entitlement > 0 {
 		fmt.Printf("%s: %s\n", usageIncludedLabel(resolvedBilling), strconv.FormatFloat(entitlement, 'f', -1, 64))
 	}
-	usedHeader, billedHeader := usageQuantityColumnHeaders(resolvedBilling)
-	header := []string{"Period", "SKU", "Model", usedHeader, billedHeader, "Amount (USD)"}
-	if last == 0 {
-		header = header[1:] // Remove Period column if only one response
-	}
-	table := render.CreateTable(header, []int{len(header) - 3, len(header) - 2, len(header) - 1}, last > 0, last > 0, tableMode)
+	multiPeriod := last > 0
+	pricingLookup := usageModelPricingLookupOrWarn(ctx, client)
+	header, rightAligned := usageTableHeader(resolvedBilling, multiPeriod)
+	table := render.CreateTable(header, rightAligned, multiPeriod, multiPeriod, tableMode)
 
 	for _, p := range periods {
 		items := periodGroups[p]
 		// Further group items by SKU within the period
 		var skus []string
-		skuGroups := make(map[string][]usageItem)
+		skuGroups := make(map[string][]usageFlatItem)
 		for _, item := range items {
 			found := false
 			for _, s := range skus {
@@ -3434,34 +3392,28 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 			skuGroups[item.SKU] = append(skuGroups[item.SKU], item)
 		}
 
-		var periodUsedTotal, periodBilledTotal, periodAmountTotal float64
+		var periodUsedTotal float64
 		for i, sku := range skus {
 			skuItems := skuGroups[sku]
-			var models, useds, billeds, amounts []string
-			var skuUsedTotal, skuBilledTotal, skuAmountTotal float64
+			var models, useds, ioSummaries []string
+			var skuUsedTotal float64
 			for _, item := range skuItems {
 				models = append(models, item.Model)
-				useds = append(useds, strconv.FormatFloat(item.GrossQuantity, 'f', -1, 64))
-				billeds = append(billeds, strconv.FormatFloat(item.NetQuantity, 'f', -1, 64))
-				amounts = append(amounts, fmt.Sprintf("$%.2f", item.NetAmount))
+				useds = append(useds, formatUsageUsedValue(item.GrossQuantity))
+				ioSummaries = append(ioSummaries, formatUsageItemIOSummary(item.Model, pricingLookup))
 				skuUsedTotal += item.GrossQuantity
-				skuBilledTotal += item.NetQuantity
-				skuAmountTotal += item.NetAmount
 			}
 			periodUsedTotal += skuUsedTotal
-			periodBilledTotal += skuBilledTotal
-			periodAmountTotal += skuAmountTotal
 
 			row := []string{
 				p,
 				sku,
 				strings.Join(models, "\n"),
 				strings.Join(useds, "\n"),
-				strings.Join(billeds, "\n"),
-				strings.Join(amounts, "\n"),
+				strings.Join(ioSummaries, "\n"),
 			}
 
-			if last == 0 {
+			if !multiPeriod {
 				row = row[1:]
 			}
 			table.Append(row)
@@ -3472,11 +3424,10 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 					p,
 					"Subtotal (All SKUs)",
 					"", // Model
-					strconv.FormatFloat(periodUsedTotal, 'f', -1, 64),
-					strconv.FormatFloat(periodBilledTotal, 'f', -1, 64),
-					fmt.Sprintf("$%.2f", periodAmountTotal),
+					formatUsageUsedValue(periodUsedTotal),
+					"", // $ I/O
 				}
-				if last == 0 {
+				if !multiPeriod {
 					subtotalRow = subtotalRow[1:]
 				}
 				table.Append(subtotalRow)
@@ -3484,17 +3435,16 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		}
 	}
 	table.Render()
+
 	fmt.Println("\nNotes:")
 	if resolvedBilling == usageBillingAICredits {
 		fmt.Println("- 'Used (credits)' is the total AI credits consumed.")
-		fmt.Println("- 'Billed (credits)' is the overage amount you are billed for.")
-		fmt.Println("- 'Amount (USD)' is the total billed cost in USD (1 credit = $0.01).")
 	} else {
 		fmt.Println("- 'Used (req.)' is the total premium requests consumed.")
-		fmt.Println("- 'Billed (req.)' is the overage amount you are billed for.")
-		fmt.Println("- 'Amount (USD)' is the total billed cost in USD.")
 		fmt.Println("- 'req.' stands for 'requests'.")
 	}
+	fmt.Println("- '$ I/O' is live SDK token pricing (USD per M tokens, input/output) from `ListModels`; unmatched models show `-`.")
+	fmt.Println("- Use `-f yaml` for billed quantities, USD amounts, and full token pricing details.")
 }
 
 type sessionEvent struct {
@@ -3804,101 +3754,101 @@ type sessionEventValidationRowRef struct {
 // Mirrors the generated SessionEventType constants (copilot-sdk v1.0.4) so
 // validator output can tell whether a row uses a type known to the current SDK.
 var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
-	copilot.SessionEventTypeAbort:                         {},
-	copilot.SessionEventTypeAssistantIntent:               {},
-	copilot.SessionEventTypeAssistantMessage:              {},
-	copilot.SessionEventTypeAssistantMessageDelta:         {},
-	copilot.SessionEventTypeAssistantMessageStart:         {},
-	copilot.SessionEventTypeAssistantReasoning:            {},
-	copilot.SessionEventTypeAssistantReasoningDelta:       {},
-	copilot.SessionEventTypeAssistantStreamingDelta:       {},
-	copilot.SessionEventTypeAssistantTurnEnd:              {},
-	copilot.SessionEventTypeAssistantTurnStart:            {},
-	copilot.SessionEventTypeAssistantUsage:                {},
-	copilot.SessionEventTypeAutoModeSwitchCompleted:       {},
-	copilot.SessionEventTypeAutoModeSwitchRequested:       {},
-	copilot.SessionEventTypeCapabilitiesChanged:           {},
-	copilot.SessionEventTypeCommandCompleted:              {},
-	copilot.SessionEventTypeCommandExecute:                {},
-	copilot.SessionEventTypeCommandQueued:                 {},
-	copilot.SessionEventTypeCommandsChanged:               {},
-	copilot.SessionEventTypeElicitationCompleted:          {},
-	copilot.SessionEventTypeElicitationRequested:          {},
-	copilot.SessionEventTypeExitPlanModeCompleted:         {},
-	copilot.SessionEventTypeExitPlanModeRequested:         {},
-	copilot.SessionEventTypeExternalToolCompleted:         {},
-	copilot.SessionEventTypeExternalToolRequested:         {},
-	copilot.SessionEventTypeHookEnd:                       {},
-	copilot.SessionEventTypeHookProgress:                  {},
-	copilot.SessionEventTypeHookStart:                     {},
-	copilot.SessionEventTypeMCPAppToolCallComplete:        {},
-	copilot.SessionEventTypeMCPOauthCompleted:             {},
-	copilot.SessionEventTypeMCPOauthRequired:              {},
-	copilot.SessionEventTypeModelCallFailure:              {},
-	copilot.SessionEventTypePendingMessagesModified:       {},
-	copilot.SessionEventTypePermissionCompleted:           {},
-	copilot.SessionEventTypePermissionRequested:           {},
-	copilot.SessionEventTypeSamplingCompleted:             {},
-	copilot.SessionEventTypeSamplingRequested:             {},
-	copilot.SessionEventTypeSessionAutopilotObjectiveChanged: {},
-	copilot.SessionEventTypeSessionBackgroundTasksChanged: {},
-	copilot.SessionEventTypeSessionBinaryAsset:            {},
-	copilot.SessionEventTypeSessionCanvasClosed:           {},
-	copilot.SessionEventTypeSessionCanvasOpened:           {},
-	copilot.SessionEventTypeSessionCanvasRecorded:         {},
-	copilot.SessionEventTypeSessionCanvasRegistryChanged:  {},
-	copilot.SessionEventTypeSessionCanvasRemoved:          {},
-	copilot.SessionEventTypeSessionCanvasUnavailable:      {},
-	copilot.SessionEventTypeSessionCompactionComplete:     {},
-	copilot.SessionEventTypeSessionCompactionStart:        {},
-	copilot.SessionEventTypeSessionContextChanged:         {},
-	copilot.SessionEventTypeSessionCustomAgentsUpdated:    {},
-	copilot.SessionEventTypeSessionCustomNotification:     {},
-	copilot.SessionEventTypeSessionError:                  {},
+	copilot.SessionEventTypeAbort:                              {},
+	copilot.SessionEventTypeAssistantIntent:                    {},
+	copilot.SessionEventTypeAssistantMessage:                   {},
+	copilot.SessionEventTypeAssistantMessageDelta:              {},
+	copilot.SessionEventTypeAssistantMessageStart:              {},
+	copilot.SessionEventTypeAssistantReasoning:                 {},
+	copilot.SessionEventTypeAssistantReasoningDelta:            {},
+	copilot.SessionEventTypeAssistantStreamingDelta:            {},
+	copilot.SessionEventTypeAssistantTurnEnd:                   {},
+	copilot.SessionEventTypeAssistantTurnStart:                 {},
+	copilot.SessionEventTypeAssistantUsage:                     {},
+	copilot.SessionEventTypeAutoModeSwitchCompleted:            {},
+	copilot.SessionEventTypeAutoModeSwitchRequested:            {},
+	copilot.SessionEventTypeCapabilitiesChanged:                {},
+	copilot.SessionEventTypeCommandCompleted:                   {},
+	copilot.SessionEventTypeCommandExecute:                     {},
+	copilot.SessionEventTypeCommandQueued:                      {},
+	copilot.SessionEventTypeCommandsChanged:                    {},
+	copilot.SessionEventTypeElicitationCompleted:               {},
+	copilot.SessionEventTypeElicitationRequested:               {},
+	copilot.SessionEventTypeExitPlanModeCompleted:              {},
+	copilot.SessionEventTypeExitPlanModeRequested:              {},
+	copilot.SessionEventTypeExternalToolCompleted:              {},
+	copilot.SessionEventTypeExternalToolRequested:              {},
+	copilot.SessionEventTypeHookEnd:                            {},
+	copilot.SessionEventTypeHookProgress:                       {},
+	copilot.SessionEventTypeHookStart:                          {},
+	copilot.SessionEventTypeMCPAppToolCallComplete:             {},
+	copilot.SessionEventTypeMCPOauthCompleted:                  {},
+	copilot.SessionEventTypeMCPOauthRequired:                   {},
+	copilot.SessionEventTypeModelCallFailure:                   {},
+	copilot.SessionEventTypePendingMessagesModified:            {},
+	copilot.SessionEventTypePermissionCompleted:                {},
+	copilot.SessionEventTypePermissionRequested:                {},
+	copilot.SessionEventTypeSamplingCompleted:                  {},
+	copilot.SessionEventTypeSamplingRequested:                  {},
+	copilot.SessionEventTypeSessionAutopilotObjectiveChanged:   {},
+	copilot.SessionEventTypeSessionBackgroundTasksChanged:      {},
+	copilot.SessionEventTypeSessionBinaryAsset:                 {},
+	copilot.SessionEventTypeSessionCanvasClosed:                {},
+	copilot.SessionEventTypeSessionCanvasOpened:                {},
+	copilot.SessionEventTypeSessionCanvasRecorded:              {},
+	copilot.SessionEventTypeSessionCanvasRegistryChanged:       {},
+	copilot.SessionEventTypeSessionCanvasRemoved:               {},
+	copilot.SessionEventTypeSessionCanvasUnavailable:           {},
+	copilot.SessionEventTypeSessionCompactionComplete:          {},
+	copilot.SessionEventTypeSessionCompactionStart:             {},
+	copilot.SessionEventTypeSessionContextChanged:              {},
+	copilot.SessionEventTypeSessionCustomAgentsUpdated:         {},
+	copilot.SessionEventTypeSessionCustomNotification:          {},
+	copilot.SessionEventTypeSessionError:                       {},
 	copilot.SessionEventTypeSessionExtensionsAttachmentsPushed: {},
-	copilot.SessionEventTypeSessionExtensionsLoaded:       {},
-	copilot.SessionEventTypeSessionHandoff:                {},
-	copilot.SessionEventTypeSessionIdle:                   {},
-	copilot.SessionEventTypeSessionInfo:                   {},
-	copilot.SessionEventTypeSessionMCPServerStatusChanged: {},
-	copilot.SessionEventTypeSessionMCPServersLoaded:       {},
-	copilot.SessionEventTypeSessionModeChanged:            {},
-	copilot.SessionEventTypeSessionModelChange:            {},
-	copilot.SessionEventTypeSessionPermissionsChanged:       {},
-	copilot.SessionEventTypeSessionPlanChanged:            {},
-	copilot.SessionEventTypeSessionRemoteSteerableChanged: {},
-	copilot.SessionEventTypeSessionResume:                 {},
-	copilot.SessionEventTypeSessionScheduleCancelled:      {},
-	copilot.SessionEventTypeSessionScheduleCreated:        {},
-	copilot.SessionEventTypeSessionScheduleRearmed:        {},
-	copilot.SessionEventTypeSessionShutdown:               {},
-	copilot.SessionEventTypeSessionSkillsLoaded:           {},
-	copilot.SessionEventTypeSessionSnapshotRewind:         {},
-	copilot.SessionEventTypeSessionStart:                  {},
-	copilot.SessionEventTypeSessionTaskComplete:           {},
-	copilot.SessionEventTypeSessionTitleChanged:           {},
-	copilot.SessionEventTypeSessionTodosChanged:           {},
-	copilot.SessionEventTypeSessionToolsUpdated:           {},
-	copilot.SessionEventTypeSessionTruncation:             {},
-	copilot.SessionEventTypeSessionUsageInfo:              {},
-	copilot.SessionEventTypeSessionWarning:                {},
-	copilot.SessionEventTypeSessionWorkspaceFileChanged:   {},
-	copilot.SessionEventTypeSkillInvoked:                  {},
-	copilot.SessionEventTypeSubagentCompleted:             {},
-	copilot.SessionEventTypeSubagentDeselected:            {},
-	copilot.SessionEventTypeSubagentFailed:                {},
-	copilot.SessionEventTypeSubagentSelected:              {},
-	copilot.SessionEventTypeSubagentStarted:               {},
-	copilot.SessionEventTypeSystemMessage:                 {},
-	copilot.SessionEventTypeSystemNotification:            {},
-	copilot.SessionEventTypeToolExecutionComplete:         {},
-	copilot.SessionEventTypeToolExecutionPartialResult:    {},
-	copilot.SessionEventTypeToolExecutionProgress:         {},
-	copilot.SessionEventTypeToolExecutionStart:            {},
-	copilot.SessionEventTypeToolUserRequested:             {},
-	copilot.SessionEventTypeUserInputCompleted:            {},
-	copilot.SessionEventTypeUserInputRequested:            {},
-	copilot.SessionEventTypeUserMessage:                   {},
+	copilot.SessionEventTypeSessionExtensionsLoaded:            {},
+	copilot.SessionEventTypeSessionHandoff:                     {},
+	copilot.SessionEventTypeSessionIdle:                        {},
+	copilot.SessionEventTypeSessionInfo:                        {},
+	copilot.SessionEventTypeSessionMCPServerStatusChanged:      {},
+	copilot.SessionEventTypeSessionMCPServersLoaded:            {},
+	copilot.SessionEventTypeSessionModeChanged:                 {},
+	copilot.SessionEventTypeSessionModelChange:                 {},
+	copilot.SessionEventTypeSessionPermissionsChanged:          {},
+	copilot.SessionEventTypeSessionPlanChanged:                 {},
+	copilot.SessionEventTypeSessionRemoteSteerableChanged:      {},
+	copilot.SessionEventTypeSessionResume:                      {},
+	copilot.SessionEventTypeSessionScheduleCancelled:           {},
+	copilot.SessionEventTypeSessionScheduleCreated:             {},
+	copilot.SessionEventTypeSessionScheduleRearmed:             {},
+	copilot.SessionEventTypeSessionShutdown:                    {},
+	copilot.SessionEventTypeSessionSkillsLoaded:                {},
+	copilot.SessionEventTypeSessionSnapshotRewind:              {},
+	copilot.SessionEventTypeSessionStart:                       {},
+	copilot.SessionEventTypeSessionTaskComplete:                {},
+	copilot.SessionEventTypeSessionTitleChanged:                {},
+	copilot.SessionEventTypeSessionTodosChanged:                {},
+	copilot.SessionEventTypeSessionToolsUpdated:                {},
+	copilot.SessionEventTypeSessionTruncation:                  {},
+	copilot.SessionEventTypeSessionUsageInfo:                   {},
+	copilot.SessionEventTypeSessionWarning:                     {},
+	copilot.SessionEventTypeSessionWorkspaceFileChanged:        {},
+	copilot.SessionEventTypeSkillInvoked:                       {},
+	copilot.SessionEventTypeSubagentCompleted:                  {},
+	copilot.SessionEventTypeSubagentDeselected:                 {},
+	copilot.SessionEventTypeSubagentFailed:                     {},
+	copilot.SessionEventTypeSubagentSelected:                   {},
+	copilot.SessionEventTypeSubagentStarted:                    {},
+	copilot.SessionEventTypeSystemMessage:                      {},
+	copilot.SessionEventTypeSystemNotification:                 {},
+	copilot.SessionEventTypeToolExecutionComplete:              {},
+	copilot.SessionEventTypeToolExecutionPartialResult:         {},
+	copilot.SessionEventTypeToolExecutionProgress:              {},
+	copilot.SessionEventTypeToolExecutionStart:                 {},
+	copilot.SessionEventTypeToolUserRequested:                  {},
+	copilot.SessionEventTypeUserInputCompleted:                 {},
+	copilot.SessionEventTypeUserInputRequested:                 {},
+	copilot.SessionEventTypeUserMessage:                        {},
 }
 
 type interactionHubAccumulator struct {
