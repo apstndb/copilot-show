@@ -28,9 +28,9 @@ Run the tool with a subcommand to inspect specific resources.
 Available subcommands:
 - `quota`: Show Copilot Premium Interactions usage and entitlement.
 - `models`: Show models returned by the live Copilot SDK `ListModels` call, with runtime limits, reasoning support, policy state, and `$ I/O` token pricing.
-- `model-docs`: Show docs-backed model metadata from `github/docs`, joined with the live CLI model list. Use `--all` for broader docs-backed fields.
+- `model-docs`: Show docs-backed model metadata from `github/docs`, joined with the live CLI model list. Use `--all` for broader docs-backed fields, or `--visible-only` to hide docs rows your account cannot select right now.
 - `tools`: Show available tools.
-- `usage`: Show billing usage report from GitHub API, with entitlement joined from quota snapshots.
+- `usage`: Show billing usage report from GitHub API (`--billing premium-request|ai-credits|auto`), with included limits joined from quota snapshots when available.
 - `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
 - `turns`: Show turn-by-turn usage statistics for a session.
 
@@ -38,6 +38,8 @@ Available subcommands:
 
 Use `--format yaml` (or `-f yaml`) to get detailed raw data in YAML format.
 Use `--table-mode ascii` or `--table-mode markdown` to change the table rendering style.
+Use `--wrap-long-text` to show full description and summary columns with terminal-width wrapping instead of compact truncation.
+Use `--discover` to enable automatic MCP and skill config discovery when commands create temporary sessions (for example `.mcp.json` and project skill directories).
 Use `--show-hidden --help` to include hidden diagnostics commands and hidden flags in help output.
 
 ### Examples
@@ -58,7 +60,7 @@ Example Output:
 ├──────────────────────┼─────────────┼──────┼────────────┼─────────┤
 │ chat                 │           0 │    0 │ Disallowed │ -       │
 │ completions          │           0 │    0 │ Disallowed │ -       │
-│ premium_interactions │         300 │   65 │ Disallowed │ 21.7%   │
+│ Premium Interactions │         300 │   65 │ Disallowed │ 21.7%   │
 └──────────────────────┴─────────────┴──────┴────────────┴─────────┘
 Last Updated: 2026-03-12T20:41:07+09:00
 
@@ -99,6 +101,9 @@ copilot-show model-docs
 # Try the latest github/docs tables first
 copilot-show model-docs --latest
 
+# Default CLI-focused table; hide docs rows not visible in ListModels
+copilot-show model-docs --visible-only
+
 # Include broader docs-backed metadata
 copilot-show model-docs --all
 
@@ -130,17 +135,31 @@ Lists built-in tools available to Copilot.
 copilot-show tools
 ```
 
+Use `--wrap-long-text` when you want the full tool description wrapped in the table instead of a shortened first line:
+
+```bash
+copilot-show tools --wrap-long-text
+copilot-show skills --wrap-long-text
+```
+
 ### Usage Report
 
-Shows detailed billing usage for premium requests from the GitHub API (requires `gh` CLI).
-Displays grouped results by Period and SKU with subtotals and entitlement information.
+Shows detailed billing usage from the GitHub API (requires `gh` CLI).
+By default it auto-detects billing mode (premium-request vs ai-credits) from quota snapshots and API data; use `--billing premium-request` or `--billing ai-credits` to force a mode.
+Displays grouped results by Period and SKU with subtotals and included limits joined from quota snapshots when available.
 Supports relative date/month/year by specifying negative values (e.g., `-d -1` for yesterday).
 Multiple periods can be shown with the `--last` flag.
 The `Period` column can be sorted in ascending or descending order with the `--sort-order` flag (default is `desc`).
 
 ```bash
-# Current month (default)
+# Current month (auto-detects billing mode)
 copilot-show usage
+
+# Force premium-request billing
+copilot-show usage --billing premium-request
+
+# Force AI credits billing (June 2026+ individual plans)
+copilot-show usage --billing ai-credits
 
 # Yesterday's report
 copilot-show usage -d -1
@@ -219,6 +238,9 @@ The following commands are hidden by default but can be executed by specifying t
 - `extensions`: List available extensions (id, status, source, pid)
 - `plugins`: List installed plugins (name, marketplace, version)
 - `mcp`: List configured MCP servers (name, status, source)
+- `mcp-config`: List user-configured MCP servers from Copilot settings
+- `discover`: Unified discovery snapshot from server-scoped SDK APIs (MCP, skills, agents, instructions, and canonical discovery paths)
+- `account`: Show account authentication and registered users
 - `current-model`: Show the currently selected model ID
 - `current-agent`: Show the currently selected agent
 - `mode`: Show the current agent mode

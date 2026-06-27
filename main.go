@@ -44,16 +44,25 @@ const (
 
 	historyGroupByNone = "none"
 	historyGroupByTurn = "turn"
+
+	usageBillingPremiumRequest = "premium-request"
+	usageBillingAICredits      = "ai-credits"
+	usageBillingAuto           = "auto"
+
+	// One AI credit equals 10^9 nano-AI units in Copilot SDK metering.
+	nanoAiuPerCredit = 1_000_000_000.0
 )
 
 var (
 	// version can be injected at build time with:
-	//   go build -ldflags "-X main.version=v0.1.6"
-	version      string
-	outputFormat string
-	tableMode    string
-	tableWidth   int
-	uiVersion    string
+	//   go build -ldflags "-X main.version=v0.2.0"
+	version              string
+	outputFormat         string
+	tableMode            string
+	tableWidth           int
+	wrapLongText         bool
+	enableConfigDiscovery bool
+	uiVersion            string
 )
 
 func cliVersion() string {
@@ -200,7 +209,7 @@ func main() {
 				return fmt.Errorf("invalid --ui-version %q: expected %q or %q", uiVersion, uiVersionOld, uiVersionNew)
 			}
 			render.SetTableWidthOverride(tableWidth)
-			render.SetTableFoldEnabled(uiVersion == uiVersionNew)
+			render.SetTableFoldEnabled(uiVersion == uiVersionNew || wrapLongText)
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -211,6 +220,8 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&outputFormat, "format", "f", "table", "Output format (table, yaml)")
 	rootCmd.PersistentFlags().StringVar(&tableMode, "table-mode", "default", "Table mode (default, ascii, markdown)")
 	rootCmd.PersistentFlags().IntVar(&tableWidth, "table-width", 0, "Set table width in columns for default/ascii output (0: auto; <0: disable wrapping/width limit; overrides COLUMNS/COLUMN)")
+	rootCmd.PersistentFlags().BoolVar(&wrapLongText, "wrap-long-text", false, "Show full long text in table columns with terminal-width wrapping instead of compact truncation")
+	rootCmd.PersistentFlags().BoolVar(&enableConfigDiscovery, "discover", false, "Enable automatic MCP and skill config discovery when creating sessions (e.g. .mcp.json, project skill directories)")
 	rootCmd.PersistentFlags().BoolVar(&showHiddenHelp, "show-hidden", false, "Include hidden commands and hidden flags in help output")
 	rootCmd.PersistentFlags().StringVar(&uiVersion, "ui-version", uiVersionNew, "Hidden UI selector for temporary A/B testing (old, new)")
 	if err := rootCmd.PersistentFlags().MarkHidden("ui-version"); err != nil {
@@ -231,6 +242,8 @@ func main() {
 		newExtensionsCmd(client),
 		newPluginsCmd(client),
 		newMcpCmd(client),
+		newMcpConfigCmd(client),
+		newAccountCmd(client),
 		newCurrentModelCmd(client),
 		newCurrentAgentCmd(client),
 		newModeCmd(client),
@@ -241,6 +254,7 @@ func main() {
 		newStatusCmd(client),
 		newSessionsCmd(client),
 		newSessionAuthCmd(client),
+		newSessionMetadataCmd(client),
 		newSessionUsageCmd(client),
 		newHistoryCmd(client),
 		newGraphCmd(client),
@@ -268,13 +282,37 @@ func printYAML(v interface{}) {
 	fmt.Print(string(data))
 }
 
-func withSession(ctx context.Context, client *copilot.Client, fn func(session *copilot.Session) error) error {
+func workingDirectoryForSession() string {
 	cwd, _ := os.Getwd()
-	session, err := client.CreateSession(ctx, &copilot.SessionConfig{
+	return cwd
+}
+
+func createSessionConfig() *copilot.SessionConfig {
+	cfg := &copilot.SessionConfig{
 		ClientName:          copilotSDKClientName,
 		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
-		WorkingDirectory:    cwd,
-	})
+		WorkingDirectory:    workingDirectoryForSession(),
+	}
+	if enableConfigDiscovery {
+		cfg.EnableConfigDiscovery = copilot.Bool(true)
+	}
+	return cfg
+}
+
+func resumeSessionConfig() *copilot.ResumeSessionConfig {
+	cfg := &copilot.ResumeSessionConfig{
+		ClientName:          copilotSDKClientName,
+		SuppressResumeEvent: true,
+		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
+	}
+	if enableConfigDiscovery {
+		cfg.EnableConfigDiscovery = copilot.Bool(true)
+	}
+	return cfg
+}
+
+func withSession(ctx context.Context, client *copilot.Client, fn func(session *copilot.Session) error) error {
+	session, err := client.CreateSession(ctx, createSessionConfig())
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
@@ -283,11 +321,7 @@ func withSession(ctx context.Context, client *copilot.Client, fn func(session *c
 }
 
 func withResumedSession(ctx context.Context, client *copilot.Client, sessionID string, fn func(session *copilot.Session) error) error {
-	session, err := client.ResumeSession(ctx, sessionID, &copilot.ResumeSessionConfig{
-		ClientName:          copilotSDKClientName,
-		SuppressResumeEvent: true,
-		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
-	})
+	session, err := client.ResumeSession(ctx, sessionID, resumeSessionConfig())
 	if err != nil {
 		return fmt.Errorf("failed to resume session %q: %w", sessionID, err)
 	}
@@ -353,7 +387,7 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 		}
 
 		table.Append([]string{
-			k,
+			formatQuotaMetricName(k),
 			strconv.FormatInt(snap.EntitlementRequests, 10),
 			strconv.FormatInt(snap.UsedRequests, 10),
 			overageVal,
@@ -427,6 +461,7 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	fmt.Println("- 'Overage' shows the extra usage after exhausting your included requests.")
 	fmt.Println("- Billing weights vary by model; session shutdown metrics preserve fractional premium-request totals.")
 	fmt.Println("- Live quota still reports premium_interactions from the Copilot SDK while GitHub rolls out AI credits on individual plans.")
+	fmt.Println("- `copilot-show usage` auto-detects premium-request vs AI-credits billing; use `--billing` to force a mode.")
 }
 
 func newModelsCmd(client *copilot.Client) *cobra.Command {
@@ -479,6 +514,7 @@ func showModels(ctx context.Context, client *copilot.Client, format string, useL
 	table.Render()
 	fmt.Println("\nNotes:")
 	fmt.Println("- `$ I/O` shows per-million-token input/output USD from Copilot SDK `ListModels` billing.")
+	fmt.Println("- `billingMultiplier` (when present) is included in YAML output.")
 	fmt.Println("- `Efforts` marks the default reasoning effort with `*` when the model reports one.")
 	fmt.Println("- `Vision` shows image count and size in the table; supported media types are in YAML output.")
 	fmt.Println("- `Context` and `Prompt` use compact token counts (for example 936k, 1M).")
@@ -502,6 +538,7 @@ type runtimeModelsSnapshot struct {
 type runtimeModelView struct {
 	ID                        string                     `json:"id" yaml:"id"`
 	Name                      string                     `json:"name" yaml:"name"`
+	BillingMultiplier         *float64                   `json:"billingMultiplier,omitempty" yaml:"billingMultiplier,omitempty"`
 	TokenPricing              *modeldocs.SDKTokenPricing `json:"tokenPricing,omitempty" yaml:"tokenPricing,omitempty"`
 	MaxContextWindowTokens    int                        `json:"maxContextWindowTokens" yaml:"maxContextWindowTokens"`
 	MaxPromptTokens           *int                       `json:"maxPromptTokens,omitempty" yaml:"maxPromptTokens,omitempty"`
@@ -537,6 +574,7 @@ func buildRuntimeModelsSnapshot(models []copilot.ModelInfo, snapshot modeldocs.S
 		result.Models = append(result.Models, runtimeModelView{
 			ID:                        model.ID,
 			Name:                      model.Name,
+			BillingMultiplier:         cloneOptionalFloat64(modelBillingMultiplier(model)),
 			TokenPricing:              cloneSDKTokenPricing(tokenPricing),
 			MaxContextWindowTokens:    intFromPtr(model.Capabilities.Limits.MaxContextWindowTokens),
 			MaxPromptTokens:           cloneOptionalInt(model.Capabilities.Limits.MaxPromptTokens),
@@ -611,6 +649,21 @@ func cloneOptionalInt(value *int) *int {
 	}
 	cloned := *value
 	return &cloned
+}
+
+func cloneOptionalFloat64(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func modelBillingMultiplier(model copilot.ModelInfo) *float64 {
+	if model.Billing == nil {
+		return nil
+	}
+	return model.Billing.Multiplier
 }
 
 func intFromPtr(value *int) int {
@@ -790,12 +843,19 @@ func firstJoinedModelPolicyState(model modeldocs.JoinedModel) string {
 	return "-"
 }
 
-func modelDocsCLISummary(models []modeldocs.JoinedModel) string {
+func modelDocsCLISummary(models []modeldocs.JoinedModel, visibleOnly bool, totalBeforeFilter int) string {
 	visible := 0
 	for _, model := range models {
 		if model.VisibleNow {
 			visible++
 		}
+	}
+	if visibleOnly {
+		return fmt.Sprintf(
+			"Copilot CLI docs: %d visible models (filtered from %d)",
+			len(models),
+			totalBeforeFilter,
+		)
 	}
 	return fmt.Sprintf(
 		"Copilot CLI docs: %d models · %d visible now · %d not visible",
@@ -877,19 +937,31 @@ func formatOptionalText(value string) string {
 func newModelDocsCmd(client *copilot.Client) *cobra.Command {
 	var useLatest bool
 	var showAll bool
+	var visibleOnly bool
 	cmd := &cobra.Command{
 		Use:   "model-docs",
 		Short: "Show CLI-focused model metadata from github/docs and the live CLI list",
 		Run: func(cmd *cobra.Command, args []string) {
-			showModelDocs(cmd.Context(), client, outputFormat, useLatest, showAll)
+			showModelDocs(cmd.Context(), client, outputFormat, useLatest, showAll, visibleOnly)
 		},
 	}
 	cmd.Flags().BoolVar(&useLatest, "latest", false, "Attempt to fetch the latest github/docs copilot tables before falling back to the embedded snapshot")
 	cmd.Flags().BoolVar(&showAll, "all", false, "Include docs-backed metadata that is not specific to Copilot CLI")
+	cmd.Flags().BoolVar(&visibleOnly, "visible-only", false, "Show only models currently visible in the live CLI list")
 	return cmd
 }
 
-func showModelDocs(ctx context.Context, client *copilot.Client, format string, useLatest bool, showAll bool) {
+func filterJoinedModelsVisibleOnly(models []modeldocs.JoinedModel) []modeldocs.JoinedModel {
+	filtered := make([]modeldocs.JoinedModel, 0, len(models))
+	for _, model := range models {
+		if model.VisibleNow {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
+func showModelDocs(ctx context.Context, client *copilot.Client, format string, useLatest bool, showAll bool, visibleOnly bool) {
 	models, err := client.ListModels(ctx)
 	if err != nil {
 		log.Printf("Error listing live models: %v", err)
@@ -907,9 +979,15 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 	cliModels := copilotCLIModelDocs(snapshot.Models)
 	if format == "yaml" {
 		if showAll {
-			printYAML(snapshot)
+			if visibleOnly {
+				filtered := snapshot
+				filtered.Models = filterJoinedModelsVisibleOnly(snapshot.Models)
+				printYAML(filtered)
+			} else {
+				printYAML(snapshot)
+			}
 		} else {
-			printYAML(buildCLIFocusedModelDocsSnapshot(snapshot))
+			printYAML(buildCLIFocusedModelDocsSnapshot(snapshot, visibleOnly))
 		}
 		return
 	}
@@ -918,25 +996,39 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 	displayModels := cliModels
 	if showAll {
 		displayModels = append([]modeldocs.JoinedModel(nil), snapshot.Models...)
-		sortJoinedModelsForDisplay(displayModels)
+	} else {
+		displayModels = append([]modeldocs.JoinedModel(nil), cliModels...)
+	}
+	totalBeforeFilter := len(displayModels)
+	if visibleOnly {
+		displayModels = filterJoinedModelsVisibleOnly(displayModels)
+	}
+	sortJoinedModelsForDisplay(displayModels)
+	if showAll {
 		fmt.Println(modelDocsCatalogSummary(displayModels, len(snapshot.RetiredModels), len(snapshot.LiveModelsWithoutDocs)))
 		header := []string{"Name", "Provider", "Release", billingHeader, "CLI", "Visible", "State", "Plans", "Modes"}
 		table := render.CreateTable(header, nil, false, false, tableMode)
 		for _, model := range displayModels {
 			table.Append(modelDocsTableRow(model, true))
 		}
-		table.Render()
+		if len(displayModels) == 0 {
+			fmt.Println("No visible models matched the current filter.")
+		} else {
+			table.Render()
+		}
 	} else {
-		displayModels = append([]modeldocs.JoinedModel(nil), cliModels...)
-		sortJoinedModelsForDisplay(displayModels)
-		fmt.Println(modelDocsCLISummary(displayModels))
+		fmt.Println(modelDocsCLISummary(displayModels, visibleOnly, totalBeforeFilter))
 		header := []string{"Name", "Provider", "Release", billingHeader, "Visible", "Plans"}
 		table := render.CreateTable(header, nil, false, false, tableMode)
 		for _, model := range displayModels {
 			table.Append(modelDocsTableRow(model, false))
 		}
 		if len(displayModels) == 0 {
-			fmt.Println("No docs-backed models with Copilot CLI support found.")
+			if visibleOnly {
+				fmt.Println("No visible docs-backed models with Copilot CLI support found.")
+			} else {
+				fmt.Println("No docs-backed models with Copilot CLI support found.")
+			}
 		} else {
 			table.Render()
 		}
@@ -1024,8 +1116,11 @@ type cliFocusedModelDocs struct {
 	LiveModels    []modeldocs.LiveMatch      `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
 }
 
-func buildCLIFocusedModelDocsSnapshot(snapshot modeldocs.Snapshot) cliFocusedModelDocsSnapshot {
+func buildCLIFocusedModelDocsSnapshot(snapshot modeldocs.Snapshot, visibleOnly bool) cliFocusedModelDocsSnapshot {
 	cliModels := copilotCLIModelDocs(snapshot.Models)
+	if visibleOnly {
+		cliModels = filterJoinedModelsVisibleOnly(cliModels)
+	}
 	models := make([]cliFocusedModelDocs, 0, len(cliModels))
 	for _, model := range cliModels {
 		models = append(models, cliFocusedModelDocs{
@@ -1091,7 +1186,7 @@ func showTools(ctx context.Context, client *copilot.Client, format string) {
 		if t.NamespacedName != nil {
 			nsName = *t.NamespacedName
 		}
-		table.Append([]string{t.Name, firstLineTableText(t.Description, 100), nsName})
+		table.Append([]string{t.Name, formatTableCellText(t.Description, 100), nsName})
 	}
 	table.Render()
 }
@@ -1123,7 +1218,7 @@ func showAgents(ctx context.Context, client *copilot.Client, format string) {
 		table := render.CreateTable(header, nil, false, false, tableMode)
 
 		for _, a := range res.Agents {
-			table.Append([]string{a.Name, a.DisplayName, inlineScalarText(a.Description)})
+			table.Append([]string{a.Name, a.DisplayName, formatInlineScalarForTable(a.Description)})
 		}
 		if len(res.Agents) == 0 {
 			fmt.Println("No custom agents found.")
@@ -1168,7 +1263,7 @@ func showSkills(ctx context.Context, client *copilot.Client, format string) {
 			if s.Path != nil {
 				path = shortenHomePath(*s.Path, home)
 			}
-			desc := firstLineTableText(s.Description, 80)
+			desc := formatTableCellText(s.Description, 80)
 			table.Append([]string{
 				s.Name,
 				fmt.Sprintf("%v", s.Enabled),
@@ -1673,6 +1768,646 @@ func showStatus(ctx context.Context, client *copilot.Client, format string) {
 	tableAuth.Render()
 }
 
+func newAccountCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "account",
+		Short: "Show account authentication and registered users",
+		Run: func(cmd *cobra.Command, args []string) {
+			showAccount(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+type accountAuthView struct {
+	Type        string `json:"type" yaml:"type"`
+	Login       string `json:"login,omitempty" yaml:"login,omitempty"`
+	Host        string `json:"host,omitempty" yaml:"host,omitempty"`
+	CopilotPlan string `json:"copilotPlan,omitempty" yaml:"copilotPlan,omitempty"`
+	EnvVar      string `json:"envVar,omitempty" yaml:"envVar,omitempty"`
+	HasSecret   bool   `json:"hasSecret,omitempty" yaml:"hasSecret,omitempty"`
+}
+
+type accountSnapshot struct {
+	AuthErrors  []string          `json:"authErrors,omitempty" yaml:"authErrors,omitempty"`
+	CurrentAuth *accountAuthView  `json:"currentAuth,omitempty" yaml:"currentAuth,omitempty"`
+	Users       []accountUserView `json:"users,omitempty" yaml:"users,omitempty"`
+}
+
+type accountUserView struct {
+	Auth      accountAuthView `json:"auth" yaml:"auth"`
+	HasToken  bool            `json:"hasToken,omitempty" yaml:"hasToken,omitempty"`
+}
+
+func showAccount(ctx context.Context, client *copilot.Client, format string) {
+	currentAuth, err := client.RPC.Account.GetCurrentAuth(ctx)
+	if err != nil {
+		log.Printf("Error fetching current auth: %v", err)
+		return
+	}
+
+	allUsers, err := client.RPC.Account.GetAllUsers(ctx)
+	if err != nil {
+		log.Printf("Error fetching account users: %v", err)
+		return
+	}
+
+	snapshot := accountSnapshot{
+		AuthErrors: append([]string(nil), currentAuth.AuthErrors...),
+	}
+	if currentAuth.AuthInfo != nil {
+		view := authInfoView(currentAuth.AuthInfo)
+		snapshot.CurrentAuth = &view
+	}
+	if allUsers != nil {
+		for _, user := range *allUsers {
+			snapshot.Users = append(snapshot.Users, accountUserView{
+				Auth:     authInfoView(user.AuthInfo),
+				HasToken: user.Token != nil && *user.Token != "",
+			})
+		}
+	}
+
+	if format == "yaml" {
+		printYAML(snapshot)
+		return
+	}
+
+	if len(snapshot.AuthErrors) > 0 {
+		fmt.Println("--- Auth Errors ---")
+		for _, authErr := range snapshot.AuthErrors {
+			fmt.Printf("- %s\n", authErr)
+		}
+	}
+
+	fmt.Println("--- Current Auth ---")
+	currentTable := render.CreateTable([]string{"Property", "Value"}, nil, false, false, tableMode)
+	if snapshot.CurrentAuth == nil {
+		currentTable.Append([]string{"Status", "Not authenticated"})
+	} else {
+		auth := snapshot.CurrentAuth
+		currentTable.Append([]string{"Type", auth.Type})
+		if auth.Login != "" {
+			currentTable.Append([]string{"Login", auth.Login})
+		}
+		if auth.Host != "" {
+			currentTable.Append([]string{"Host", auth.Host})
+		}
+		if auth.CopilotPlan != "" {
+			currentTable.Append([]string{"Copilot Plan", auth.CopilotPlan})
+		}
+		if auth.EnvVar != "" {
+			currentTable.Append([]string{"Env Var", auth.EnvVar})
+		}
+		if auth.HasSecret {
+			currentTable.Append([]string{"Secret", "Present (redacted)"})
+		}
+	}
+	currentTable.Render()
+
+	fmt.Println("\n--- Registered Users ---")
+	userTable := render.CreateTable([]string{"Type", "Login", "Host", "Copilot Plan", "Token"}, nil, false, false, tableMode)
+	for _, user := range snapshot.Users {
+		tokenStatus := "No"
+		if user.HasToken {
+			tokenStatus = "Yes"
+		}
+		userTable.Append([]string{
+			formatOptionalText(user.Auth.Type),
+			formatOptionalText(user.Auth.Login),
+			formatOptionalText(user.Auth.Host),
+			formatOptionalText(user.Auth.CopilotPlan),
+			tokenStatus,
+		})
+	}
+	if len(snapshot.Users) == 0 {
+		fmt.Println("No registered users found.")
+		return
+	}
+	userTable.Render()
+}
+
+func authInfoView(auth rpc.AuthInfo) accountAuthView {
+	if auth == nil {
+		return accountAuthView{}
+	}
+	view := accountAuthView{Type: string(auth.Type())}
+	switch info := auth.(type) {
+	case rpc.GhCLIAuthInfo:
+		view.Login = info.Login
+		view.Host = info.Host
+		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+		view.HasSecret = info.Token != ""
+	case *rpc.GhCLIAuthInfo:
+		if info != nil {
+			view.Login = info.Login
+			view.Host = info.Host
+			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+			view.HasSecret = info.Token != ""
+		}
+	case rpc.CopilotAPITokenAuthInfo:
+		view.Host = string(info.Host)
+		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+	case *rpc.CopilotAPITokenAuthInfo:
+		if info != nil {
+			view.Host = string(info.Host)
+			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+		}
+	case rpc.EnvAuthInfo:
+		view.Host = info.Host
+		view.EnvVar = info.EnvVar
+		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+		view.HasSecret = info.Token != ""
+		if info.Login != nil {
+			view.Login = *info.Login
+		}
+	case *rpc.EnvAuthInfo:
+		if info != nil {
+			view.Host = info.Host
+			view.EnvVar = info.EnvVar
+			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+			view.HasSecret = info.Token != ""
+			if info.Login != nil {
+				view.Login = *info.Login
+			}
+		}
+	case rpc.APIKeyAuthInfo:
+		view.Host = info.Host
+		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+		view.HasSecret = info.APIKey != ""
+	case *rpc.APIKeyAuthInfo:
+		if info != nil {
+			view.Host = info.Host
+			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+			view.HasSecret = info.APIKey != ""
+		}
+	case rpc.HMACAuthInfo:
+		view.Host = string(info.Host)
+		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+		view.HasSecret = info.HMAC != ""
+	case *rpc.HMACAuthInfo:
+		if info != nil {
+			view.Host = string(info.Host)
+			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+			view.HasSecret = info.HMAC != ""
+		}
+	}
+	return view
+}
+
+func copilotPlanFromUser(user *rpc.CopilotUserResponse) string {
+	if user == nil || user.CopilotPlan == nil {
+		return ""
+	}
+	return *user.CopilotPlan
+}
+
+func newMcpConfigCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "mcp-config",
+		Short: "List user-configured MCP servers from Copilot settings",
+		Run: func(cmd *cobra.Command, args []string) {
+			showMcpConfig(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+type mcpConfigRow struct {
+	Name      string `json:"name" yaml:"name"`
+	Transport string `json:"transport" yaml:"transport"`
+	Target    string `json:"target" yaml:"target"`
+}
+
+func showMcpConfig(ctx context.Context, client *copilot.Client, format string) {
+	config, err := client.RPC.MCP.Config().List(ctx)
+	if err != nil {
+		log.Printf("Error listing MCP config: %v", err)
+		return
+	}
+
+	rows := make([]mcpConfigRow, 0, len(config.Servers))
+	names := make([]string, 0, len(config.Servers))
+	for name := range config.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		rows = append(rows, summarizeMCPServerConfig(name, config.Servers[name]))
+	}
+
+	if format == "yaml" {
+		printYAML(struct {
+			Servers []mcpConfigRow `json:"servers" yaml:"servers"`
+		}{
+			Servers: rows,
+		})
+		return
+	}
+
+	header := []string{"Name", "Transport", "Target"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, row := range rows {
+		table.Append([]string{row.Name, row.Transport, row.Target})
+	}
+	if len(rows) == 0 {
+		fmt.Println("No MCP servers configured.")
+		return
+	}
+	table.Render()
+}
+
+func summarizeMCPServerConfig(name string, cfg rpc.MCPServerConfig) mcpConfigRow {
+	switch server := cfg.(type) {
+	case *rpc.MCPServerConfigStdio:
+		if server == nil {
+			break
+		}
+		target := server.Command
+		if len(server.Args) > 0 {
+			target += " " + strings.Join(server.Args, " ")
+		}
+		return mcpConfigRow{Name: name, Transport: "stdio", Target: target}
+	case rpc.MCPServerConfigStdio:
+		target := server.Command
+		if len(server.Args) > 0 {
+			target += " " + strings.Join(server.Args, " ")
+		}
+		return mcpConfigRow{Name: name, Transport: "stdio", Target: target}
+	case *rpc.MCPServerConfigHTTP:
+		if server == nil {
+			break
+		}
+		transport := "http"
+		if server.Type != nil {
+			transport = string(*server.Type)
+		}
+		return mcpConfigRow{Name: name, Transport: transport, Target: server.URL}
+	case rpc.MCPServerConfigHTTP:
+		transport := "http"
+		if server.Type != nil {
+			transport = string(*server.Type)
+		}
+		return mcpConfigRow{Name: name, Transport: transport, Target: server.URL}
+	}
+	return mcpConfigRow{Name: name, Transport: "unknown", Target: "-"}
+}
+
+func newDiscoverCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:    "discover",
+		Short:  "Show a unified discovery snapshot from Copilot SDK server APIs",
+		Hidden: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			showDiscover(cmd.Context(), client, outputFormat)
+		},
+	}
+}
+
+type discoverSnapshot struct {
+	WorkingDirectory   string                         `json:"workingDirectory" yaml:"workingDirectory"`
+	McpServers         []rpc.DiscoveredMCPServer      `json:"mcpServers" yaml:"mcpServers"`
+	Skills             []rpc.ServerSkill              `json:"skills" yaml:"skills"`
+	Agents             []rpc.AgentInfo                `json:"agents" yaml:"agents"`
+	Instructions       []rpc.InstructionSource        `json:"instructions" yaml:"instructions"`
+	AgentPaths         []rpc.AgentDiscoveryPath       `json:"agentPaths" yaml:"agentPaths"`
+	SkillPaths         []rpc.SkillDiscoveryPath       `json:"skillPaths" yaml:"skillPaths"`
+	InstructionPaths   []rpc.InstructionDiscoveryPath `json:"instructionPaths" yaml:"instructionPaths"`
+}
+
+func collectDiscoverSnapshot(ctx context.Context, client *copilot.Client) (*discoverSnapshot, error) {
+	cwd := workingDirectoryForSession()
+	projectPaths := []string{cwd}
+	snapshot := &discoverSnapshot{WorkingDirectory: cwd}
+
+	mcpResult, err := client.RPC.MCP.Discover(ctx, &rpc.MCPDiscoverRequest{
+		WorkingDirectory: &cwd,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mcp discover: %w", err)
+	}
+	if mcpResult != nil {
+		snapshot.McpServers = append(snapshot.McpServers, mcpResult.Servers...)
+	}
+
+	skillsResult, err := client.RPC.Skills.Discover(ctx, &rpc.SkillsDiscoverRequest{
+		ProjectPaths: projectPaths,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("skills discover: %w", err)
+	}
+	if skillsResult != nil {
+		snapshot.Skills = append(snapshot.Skills, skillsResult.Skills...)
+	}
+
+	agentsResult, err := client.RPC.Agents.Discover(ctx, &rpc.AgentsDiscoverRequest{
+		ProjectPaths: projectPaths,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agents discover: %w", err)
+	}
+	if agentsResult != nil {
+		snapshot.Agents = append(snapshot.Agents, agentsResult.Agents...)
+	}
+
+	instructionsResult, err := client.RPC.Instructions.Discover(ctx, &rpc.InstructionsDiscoverRequest{
+		ProjectPaths: projectPaths,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("instructions discover: %w", err)
+	}
+	if instructionsResult != nil {
+		snapshot.Instructions = append(snapshot.Instructions, instructionsResult.Sources...)
+	}
+
+	agentPaths, err := client.RPC.Agents.GetDiscoveryPaths(ctx, &rpc.AgentsGetDiscoveryPathsRequest{
+		ProjectPaths: projectPaths,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agents getDiscoveryPaths: %w", err)
+	}
+	if agentPaths != nil {
+		snapshot.AgentPaths = append(snapshot.AgentPaths, agentPaths.Paths...)
+	}
+
+	skillPaths, err := client.RPC.Skills.GetDiscoveryPaths(ctx, &rpc.SkillsGetDiscoveryPathsRequest{
+		ProjectPaths: projectPaths,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("skills getDiscoveryPaths: %w", err)
+	}
+	if skillPaths != nil {
+		snapshot.SkillPaths = append(snapshot.SkillPaths, skillPaths.Paths...)
+	}
+
+	instructionPaths, err := client.RPC.Instructions.GetDiscoveryPaths(ctx, &rpc.InstructionsGetDiscoveryPathsRequest{
+		ProjectPaths: projectPaths,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("instructions getDiscoveryPaths: %w", err)
+	}
+	if instructionPaths != nil {
+		snapshot.InstructionPaths = append(snapshot.InstructionPaths, instructionPaths.Paths...)
+	}
+
+	return snapshot, nil
+}
+
+func showDiscover(ctx context.Context, client *copilot.Client, format string) {
+	snapshot, err := collectDiscoverSnapshot(ctx, client)
+	if err != nil {
+		log.Printf("Error in discover command: %v", err)
+		return
+	}
+
+	if format == "yaml" {
+		printYAML(snapshot)
+		return
+	}
+
+	home, _ := os.UserHomeDir()
+	fmt.Printf("Working directory: %s\n\n", shortenHomePath(snapshot.WorkingDirectory, home))
+
+	fmt.Println("--- MCP Servers (discovered) ---")
+	renderDiscoverMcpTable(snapshot.McpServers)
+
+	fmt.Println("\n--- Skills (discovered) ---")
+	renderDiscoverSkillsTable(snapshot.Skills, home)
+
+	fmt.Println("\n--- Agents (discovered) ---")
+	renderDiscoverAgentsTable(snapshot.Agents)
+
+	fmt.Println("\n--- Instructions (discovered) ---")
+	renderDiscoverInstructionsTable(snapshot.Instructions, home)
+
+	fmt.Println("\n--- Agent Discovery Paths ---")
+	renderAgentDiscoveryPathsTable(snapshot.AgentPaths, home)
+
+	fmt.Println("\n--- Skill Discovery Paths ---")
+	renderSkillDiscoveryPathsTable(snapshot.SkillPaths, home)
+
+	fmt.Println("\n--- Instruction Discovery Paths ---")
+	renderInstructionDiscoveryPathsTable(snapshot.InstructionPaths, home)
+}
+
+func renderDiscoverMcpTable(servers []rpc.DiscoveredMCPServer) {
+	header := []string{"Name", "Enabled", "Source", "Type", "Plugin"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, server := range servers {
+		transport := "-"
+		if server.Type != nil {
+			transport = string(*server.Type)
+		}
+		plugin := "-"
+		if server.SourcePlugin != nil && *server.SourcePlugin != "" {
+			plugin = *server.SourcePlugin
+		}
+		table.Append([]string{
+			server.Name,
+			fmt.Sprintf("%v", server.Enabled),
+			string(server.Source),
+			transport,
+			plugin,
+		})
+	}
+	if len(servers) == 0 {
+		fmt.Println("No MCP servers discovered.")
+		return
+	}
+	table.Render()
+}
+
+func renderDiscoverSkillsTable(skills []rpc.ServerSkill, home string) {
+	header := []string{"Name", "Enabled", "Source", "Invocable", "Path", "Description"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, skill := range skills {
+		path := ""
+		if skill.Path != nil {
+			path = shortenHomePath(*skill.Path, home)
+		}
+		table.Append([]string{
+			skill.Name,
+			fmt.Sprintf("%v", skill.Enabled),
+			string(skill.Source),
+			fmt.Sprintf("%v", skill.UserInvocable),
+			path,
+			formatInlineScalarForTable(skill.Description),
+		})
+	}
+	if len(skills) == 0 {
+		fmt.Println("No skills discovered.")
+		return
+	}
+	table.Render()
+}
+
+func renderDiscoverAgentsTable(agents []rpc.AgentInfo) {
+	header := []string{"Name", "Display Name", "Description"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, agent := range agents {
+		table.Append([]string{
+			agent.Name,
+			agent.DisplayName,
+			formatInlineScalarForTable(agent.Description),
+		})
+	}
+	if len(agents) == 0 {
+		fmt.Println("No agents discovered.")
+		return
+	}
+	table.Render()
+}
+
+func renderDiscoverInstructionsTable(sources []rpc.InstructionSource, home string) {
+	header := []string{"ID", "Label", "Type", "Location", "Source Path", "Description"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, source := range sources {
+		desc := ""
+		if source.Description != nil {
+			desc = formatInlineScalarForTable(*source.Description)
+		}
+		table.Append([]string{
+			source.ID,
+			source.Label,
+			string(source.Type),
+			string(source.Location),
+			shortenHomePath(source.SourcePath, home),
+			desc,
+		})
+	}
+	if len(sources) == 0 {
+		fmt.Println("No instruction sources discovered.")
+		return
+	}
+	table.Render()
+}
+
+func renderAgentDiscoveryPathsTable(paths []rpc.AgentDiscoveryPath, home string) {
+	header := []string{"Scope", "Path", "Preferred", "Project Path"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, path := range paths {
+		projectPath := "-"
+		if path.ProjectPath != nil && *path.ProjectPath != "" {
+			projectPath = shortenHomePath(*path.ProjectPath, home)
+		}
+		table.Append([]string{
+			string(path.Scope),
+			shortenHomePath(path.Path, home),
+			fmt.Sprintf("%v", path.PreferredForCreation),
+			projectPath,
+		})
+	}
+	if len(paths) == 0 {
+		fmt.Println("No agent discovery paths returned.")
+		return
+	}
+	table.Render()
+}
+
+func renderSkillDiscoveryPathsTable(paths []rpc.SkillDiscoveryPath, home string) {
+	header := []string{"Scope", "Path", "Preferred", "Project Path"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, path := range paths {
+		projectPath := "-"
+		if path.ProjectPath != nil && *path.ProjectPath != "" {
+			projectPath = shortenHomePath(*path.ProjectPath, home)
+		}
+		table.Append([]string{
+			string(path.Scope),
+			shortenHomePath(path.Path, home),
+			fmt.Sprintf("%v", path.PreferredForCreation),
+			projectPath,
+		})
+	}
+	if len(paths) == 0 {
+		fmt.Println("No skill discovery paths returned.")
+		return
+	}
+	table.Render()
+}
+
+func renderInstructionDiscoveryPathsTable(paths []rpc.InstructionDiscoveryPath, home string) {
+	header := []string{"Location", "Kind", "Path", "Preferred", "Project Path"}
+	table := render.CreateTable(header, nil, false, false, tableMode)
+	for _, path := range paths {
+		projectPath := "-"
+		if path.ProjectPath != nil && *path.ProjectPath != "" {
+			projectPath = shortenHomePath(*path.ProjectPath, home)
+		}
+		table.Append([]string{
+			string(path.Location),
+			string(path.Kind),
+			shortenHomePath(path.Path, home),
+			fmt.Sprintf("%v", path.PreferredForCreation),
+			projectPath,
+		})
+	}
+	if len(paths) == 0 {
+		fmt.Println("No instruction discovery paths returned.")
+		return
+	}
+	table.Render()
+}
+
+func newSessionMetadataCmd(client *copilot.Client) *cobra.Command {
+	return &cobra.Command{
+		Use:   "session-metadata [sessionID]",
+		Short: "Show session metadata snapshot (model, mode, workspace)",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			if err != nil {
+				log.Printf("%v", err)
+				return
+			}
+			showSessionMetadata(cmd.Context(), client, sessionID, outputFormat)
+		},
+	}
+}
+
+func showSessionMetadata(ctx context.Context, client *copilot.Client, sessionID string, format string) {
+	err := withResumedSession(ctx, client, sessionID, func(session *copilot.Session) error {
+		snapshot, err := session.RPC.Metadata.Snapshot(ctx)
+		if err != nil {
+			return err
+		}
+
+		if format == "yaml" {
+			printYAML(struct {
+				SessionID string                       `json:"sessionId" yaml:"sessionId"`
+				Metadata  *rpc.SessionMetadataSnapshot `json:"metadata" yaml:"metadata"`
+			}{
+				SessionID: sessionID,
+				Metadata:  snapshot,
+			})
+			return nil
+		}
+
+		table := render.CreateTable([]string{"Property", "Value"}, nil, false, false, tableMode)
+		table.Append([]string{"Session ID", snapshot.SessionID})
+		table.Append([]string{"Current Mode", string(snapshot.CurrentMode)})
+		table.Append([]string{"Selected Model", formatOptionalString(snapshot.SelectedModel)})
+		table.Append([]string{"Working Directory", snapshot.WorkingDirectory})
+		table.Append([]string{"Workspace Path", formatOptionalString(snapshot.WorkspacePath)})
+		table.Append([]string{"Remote", fmt.Sprintf("%v", snapshot.IsRemote)})
+		table.Append([]string{"Already In Use", fmt.Sprintf("%v", snapshot.AlreadyInUse)})
+		table.Append([]string{"Start Time", snapshot.StartTime.Local().Format(time.RFC3339)})
+		table.Append([]string{"Modified Time", snapshot.ModifiedTime.Local().Format(time.RFC3339)})
+		if snapshot.ClientName != nil {
+			table.Append([]string{"Client Name", *snapshot.ClientName})
+		}
+		if snapshot.InitialName != nil {
+			table.Append([]string{"Initial Name", *snapshot.InitialName})
+		}
+		if snapshot.Summary != nil {
+			table.Append([]string{"Summary", *snapshot.Summary})
+		}
+		table.Render()
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error in session-metadata command: %v", err)
+	}
+}
+
 func newSessionAuthCmd(client *copilot.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "session-auth [sessionID]",
@@ -1763,6 +2498,7 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 		summary.Append([]string{"Start Time", formatTimeRFC3339(metrics.SessionStartTime)})
 		summary.Append([]string{"User Requests", strconv.FormatInt(metrics.TotalUserRequests, 10)})
 		summary.Append([]string{"Premium Cost", render.FormatFloatCompact(metrics.TotalPremiumRequestCost)})
+		summary.Append([]string{"AI Credits (session)", formatOptionalCredits(metrics.TotalNanoAiu)})
 		summary.Append([]string{"API Duration", formatMilliseconds(float64(metrics.TotalAPIDurationMs))})
 		summary.Append([]string{"Last Call Input", strconv.FormatInt(metrics.LastCallInputTokens, 10)})
 		summary.Append([]string{"Last Call Output", strconv.FormatInt(metrics.LastCallOutputTokens, 10)})
@@ -1777,8 +2513,8 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 
 		fmt.Println()
 		table := render.CreateTable(
-			[]string{"Model", "Requests", "PR Cost", "Input", "Cache Read", "Cache Write", "Output", "Reasoning"},
-			[]int{1, 2, 3, 4, 5, 6, 7},
+			[]string{"Model", "Requests", "PR Cost", "AI Credits", "Input", "Cache Read", "Cache Write", "Output", "Reasoning"},
+			[]int{1, 2, 3, 4, 5, 6, 7, 8},
 			false,
 			false,
 			tableMode,
@@ -1796,6 +2532,7 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 				modelID,
 				strconv.FormatInt(mm.Requests.Count, 10),
 				render.FormatFloatCompact(mm.Requests.Cost),
+				formatOptionalCredits(mm.TotalNanoAiu),
 				strconv.FormatInt(mm.Usage.InputTokens, 10),
 				strconv.FormatInt(mm.Usage.CacheReadTokens, 10),
 				strconv.FormatInt(mm.Usage.CacheWriteTokens, 10),
@@ -1877,7 +2614,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 		}
 		summary := "-"
 		if s.Summary != nil {
-			summary = inlineScalarText(*s.Summary)
+			summary = formatInlineScalarForTable(*s.Summary)
 		}
 		status := ""
 		if lastID != nil && s.SessionID == *lastID {
@@ -1928,11 +2665,11 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 
 		table.Append([]string{
 			shortenSessionTableID(s.SessionID),
-			wrapSessionTableValue(summary, wrapWidths.summary),
-			wrapSessionTableValue(cwd, wrapWidths.cwd),
+			formatSessionTableCell(summary, wrapWidths.summary),
+			formatSessionTableCell(cwd, wrapWidths.cwd),
 			formatRelativeTimestamp(s.StartTime, now),
 			formatRelativeTimestamp(s.ModifiedTime, now),
-			wrapSessionTableValue(status, wrapWidths.status),
+			formatSessionTableCell(status, wrapWidths.status),
 		})
 	}
 	if len(sessions) == 0 {
@@ -2247,7 +2984,7 @@ func newValidateEventsCmd(client *copilot.Client) *cobra.Command {
 
 func newUsageCmd(client *copilot.Client) *cobra.Command {
 	var year, month, day, last int
-	var product, model, sortOrder string
+	var product, model, sortOrder, billing string
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Show detailed billing usage from GitHub API",
@@ -2300,7 +3037,12 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 				}
 			}
 
-			showUsage(cmd.Context(), client, outputFormat, year, month, day, product, model, last, sortOrder)
+			mode, err := parseUsageBillingMode(billing)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			showUsage(cmd.Context(), client, outputFormat, year, month, day, product, model, last, sortOrder, mode)
 		},
 	}
 	cmd.Flags().IntVarP(&year, "year", "y", 0, "Year for usage report (positive for absolute, negative for relative)")
@@ -2312,6 +3054,7 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 	cmd.Flags().StringVarP(&model, "model", "M", "", "Model to filter (e.g., gpt-5, claude-opus-4.6)")
 	cmd.Flags().MarkHidden("model")
 	cmd.Flags().StringVar(&sortOrder, "sort-order", "desc", "Sort order for Period (asc, desc)")
+	cmd.Flags().StringVar(&billing, "billing", usageBillingAuto, "Billing unit for the usage report (premium-request, ai-credits, auto)")
 	return cmd
 }
 
@@ -2337,9 +3080,33 @@ type usageResponse struct {
 	} `json:"usageItems" yaml:"usageItems"`
 }
 
-func fetchUsage(username string, year, month, day int, product, model string) (*usageResponse, error) {
-	// Execute billing usage API command
-	path := fmt.Sprintf("/users/%s/settings/billing/premium_request/usage?year=%d", username, year)
+type usageReportOutput struct {
+	BillingMode string `json:"billingMode" yaml:"billingMode"`
+	Reports     any    `json:"reports" yaml:"reports"`
+}
+
+func parseUsageBillingMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", usageBillingPremiumRequest:
+		return usageBillingPremiumRequest, nil
+	case usageBillingAICredits:
+		return usageBillingAICredits, nil
+	case usageBillingAuto:
+		return usageBillingAuto, nil
+	default:
+		return "", fmt.Errorf("invalid --billing value %q (want premium-request, ai-credits, or auto)", raw)
+	}
+}
+
+func usageBillingAPISegment(billingMode string) string {
+	if billingMode == usageBillingAICredits {
+		return "ai_credit"
+	}
+	return "premium_request"
+}
+
+func buildUsageAPIPath(username string, year, month, day int, product, model, billingMode string) string {
+	path := fmt.Sprintf("/users/%s/settings/billing/%s/usage?year=%d", username, usageBillingAPISegment(billingMode), year)
 	if month > 0 {
 		path += fmt.Sprintf("&month=%d", month)
 	}
@@ -2352,6 +3119,102 @@ func fetchUsage(username string, year, month, day int, product, model string) (*
 	if model != "" {
 		path += fmt.Sprintf("&model=%s", model)
 	}
+	return path
+}
+
+func usageQuantityColumnHeaders(billingMode string) (used, billed string) {
+	if billingMode == usageBillingAICredits {
+		return "Used (credits)", "Billed (credits)"
+	}
+	return "Used (req.)", "Billed (req.)"
+}
+
+func usageReportTitle(billingMode string) string {
+	if billingMode == usageBillingAICredits {
+		return "Billing Usage (AI Credits)"
+	}
+	return "Billing Usage (Premium Requests)"
+}
+
+func usageIncludedLabel(billingMode string) string {
+	if billingMode == usageBillingAICredits {
+		return "Monthly Included AI Credits (current plan)"
+	}
+	return "Monthly Included Premium Requests (current plan)"
+}
+
+func quotaIncludedLimit(quota *rpc.AccountGetQuotaResult, billingMode string) float64 {
+	if quota == nil {
+		return 0
+	}
+	switch billingMode {
+	case usageBillingAICredits:
+		for _, key := range []string{"ai_credits", "ai_credit", "ai-credits"} {
+			if snap, ok := quota.QuotaSnapshots[key]; ok && snap.EntitlementRequests > 0 {
+				return float64(snap.EntitlementRequests)
+			}
+		}
+		return 0
+	default:
+		if snap, ok := quota.QuotaSnapshots["premium_interactions"]; ok {
+			return float64(snap.EntitlementRequests)
+		}
+		return 0
+	}
+}
+
+func detectUsageBillingModeFromQuota(quota *rpc.AccountGetQuotaResult) string {
+	if quota == nil {
+		return ""
+	}
+	for _, key := range []string{"ai_credits", "ai_credit", "ai-credits"} {
+		if snap, ok := quota.QuotaSnapshots[key]; ok {
+			if snap.UsedRequests > 0 || snap.EntitlementRequests > 0 {
+				return usageBillingAICredits
+			}
+		}
+	}
+	return ""
+}
+
+func usageResponseHasItems(res *usageResponse) bool {
+	return res != nil && len(res.UsageItems) > 0
+}
+
+func resolveUsageBillingMode(requested string, premium, aiCredits *usageResponse, quota *rpc.AccountGetQuotaResult) string {
+	if requested != usageBillingAuto {
+		return requested
+	}
+	if fromQuota := detectUsageBillingModeFromQuota(quota); fromQuota != "" {
+		return fromQuota
+	}
+	premiumHas := usageResponseHasItems(premium)
+	aiHas := usageResponseHasItems(aiCredits)
+	if aiHas && !premiumHas {
+		return usageBillingAICredits
+	}
+	if premiumHas {
+		return usageBillingPremiumRequest
+	}
+	if aiHas {
+		return usageBillingAICredits
+	}
+	return usageBillingPremiumRequest
+}
+
+func nanoAiuToCredits(nano float64) float64 {
+	return nano / nanoAiuPerCredit
+}
+
+func formatOptionalCredits(nano *float64) string {
+	if nano == nil {
+		return "-"
+	}
+	return strconv.FormatFloat(nanoAiuToCredits(*nano), 'f', -1, 64)
+}
+
+func fetchUsage(username string, year, month, day int, product, model, billingMode string) (*usageResponse, error) {
+	path := buildUsageAPIPath(username, year, month, day, product, model, billingMode)
 
 	cmd := exec.Command("gh", "api", path)
 	out, err := cmd.Output()
@@ -2369,7 +3232,7 @@ func fetchUsage(username string, year, month, day int, product, model string) (*
 	return &res, nil
 }
 
-func showUsage(ctx context.Context, client *copilot.Client, format string, year, month, day int, product, model string, last int, sortOrder string) {
+func showUsage(ctx context.Context, client *copilot.Client, format string, year, month, day int, product, model string, last int, sortOrder string, billingMode string) {
 	// 1. Get current username
 	userCmd := exec.Command("gh", "api", "/user", "--jq", ".login")
 	userOut, err := userCmd.Output()
@@ -2378,6 +3241,25 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		return
 	}
 	username := strings.TrimSpace(string(userOut))
+
+	quotaRes, err := client.RPC.Account.GetQuota(ctx, nil)
+	if err != nil {
+		log.Printf("Warning: could not fetch quota for included limits: %v", err)
+	}
+
+	resolvedBilling := billingMode
+	if billingMode == usageBillingAuto {
+		var premiumProbe, aiCreditsProbe *usageResponse
+		premiumProbe, err = fetchUsage(username, year, month, day, product, model, usageBillingPremiumRequest)
+		if err != nil {
+			log.Printf("Warning: could not probe premium-request usage: %v", err)
+		}
+		aiCreditsProbe, err = fetchUsage(username, year, month, day, product, model, usageBillingAICredits)
+		if err != nil {
+			log.Printf("Warning: could not probe ai-credits usage: %v", err)
+		}
+		resolvedBilling = resolveUsageBillingMode(billingMode, premiumProbe, aiCreditsProbe, quotaRes)
+	}
 
 	var responses []*usageResponse
 
@@ -2405,7 +3287,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 				date := targetDate.AddDate(-i, 0, 0)
 				y, m, d = date.Year(), 0, 0
 			}
-			res, err := fetchUsage(username, y, m, d, product, model)
+			res, err := fetchUsage(username, y, m, d, product, model, resolvedBilling)
 			if err != nil {
 				log.Printf("Failed to fetch usage for %d-%02d-%02d: %v", y, m, d, err)
 				continue
@@ -2413,7 +3295,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 			responses = append(responses, res)
 		}
 	} else {
-		res, err := fetchUsage(username, year, month, day, product, model)
+		res, err := fetchUsage(username, year, month, day, product, model, resolvedBilling)
 		if err != nil {
 			log.Print(err)
 			return
@@ -2422,11 +3304,13 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 
 	if format == "yaml" {
+		output := usageReportOutput{BillingMode: resolvedBilling}
 		if len(responses) == 1 {
-			printYAML(responses[0])
+			output.Reports = responses[0]
 		} else {
-			printYAML(responses)
+			output.Reports = responses
 		}
+		printYAML(output)
 		return
 	}
 
@@ -2451,13 +3335,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 
 	// Fetch included limit if available (for reference only, as it's for current month)
-	var entitlement float64
-	quotaRes, err := client.RPC.Account.GetQuota(ctx, nil)
-	if err == nil {
-		if snap, ok := quotaRes.QuotaSnapshots["premium_interactions"]; ok {
-			entitlement = float64(snap.EntitlementRequests)
-		}
-	}
+	entitlement := quotaIncludedLimit(quotaRes, resolvedBilling)
 
 	var usageItems []usageItem
 	for _, res := range responses {
@@ -2518,19 +3396,20 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 
 	if len(usageItems) == 0 {
-		fmt.Printf("--- Billing Usage for %s (%s) ---\n", username, responses[0].User)
+		fmt.Printf("--- %s for %s (%s) ---\n", usageReportTitle(resolvedBilling), username, responses[0].User)
 		if entitlement > 0 {
-			fmt.Printf("Monthly Included Premium Requests (current plan): %s\n", strconv.FormatFloat(entitlement, 'f', -1, 64))
+			fmt.Printf("%s: %s\n", usageIncludedLabel(resolvedBilling), strconv.FormatFloat(entitlement, 'f', -1, 64))
 		}
 		fmt.Println("No billable usage items found for the selected period.")
 		return
 	}
 
-	fmt.Printf("--- Billing Usage for %s (%s) ---\n", username, responses[0].User)
+	fmt.Printf("--- %s for %s (%s) ---\n", usageReportTitle(resolvedBilling), username, responses[0].User)
 	if entitlement > 0 {
-		fmt.Printf("Monthly Included Premium Requests (current plan): %s\n", strconv.FormatFloat(entitlement, 'f', -1, 64))
+		fmt.Printf("%s: %s\n", usageIncludedLabel(resolvedBilling), strconv.FormatFloat(entitlement, 'f', -1, 64))
 	}
-	header := []string{"Period", "SKU", "Model", "Used (req.)", "Billed (req.)", "Amount (USD)"}
+	usedHeader, billedHeader := usageQuantityColumnHeaders(resolvedBilling)
+	header := []string{"Period", "SKU", "Model", usedHeader, billedHeader, "Amount (USD)"}
 	if last == 0 {
 		header = header[1:] // Remove Period column if only one response
 	}
@@ -2606,10 +3485,16 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 	table.Render()
 	fmt.Println("\nNotes:")
-	fmt.Println("- 'Used (req.)' is the total premium requests consumed.")
-	fmt.Println("- 'Billed (req.)' is the overage amount you are billed for.")
-	fmt.Println("- 'Amount (USD)' is the total billed cost in USD.")
-	fmt.Println("- 'req.' stands for 'requests'.")
+	if resolvedBilling == usageBillingAICredits {
+		fmt.Println("- 'Used (credits)' is the total AI credits consumed.")
+		fmt.Println("- 'Billed (credits)' is the overage amount you are billed for.")
+		fmt.Println("- 'Amount (USD)' is the total billed cost in USD (1 credit = $0.01).")
+	} else {
+		fmt.Println("- 'Used (req.)' is the total premium requests consumed.")
+		fmt.Println("- 'Billed (req.)' is the overage amount you are billed for.")
+		fmt.Println("- 'Amount (USD)' is the total billed cost in USD.")
+		fmt.Println("- 'req.' stands for 'requests'.")
+	}
 }
 
 type sessionEvent struct {
@@ -4110,6 +4995,35 @@ func inlineScalarText(value string) string {
 	return truncateRunes(normalizeInlineText(value), 120)
 }
 
+func formatInlineScalarForTable(value string) string {
+	if wrapLongText {
+		return tableWrappedCellText(value)
+	}
+	return inlineScalarText(value)
+}
+
+func formatTableCellText(text string, compactMaxRunes int) string {
+	if wrapLongText {
+		return tableWrappedCellText(text)
+	}
+	return firstLineTableText(text, compactMaxRunes)
+}
+
+func tableWrappedCellText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "-"
+	}
+	return text
+}
+
+func formatSessionTableCell(value string, width int) string {
+	if wrapLongText {
+		return tableWrappedCellText(value)
+	}
+	return wrapSessionTableValue(value, width)
+}
+
 func firstLineTableText(text string, maxRunes int) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -4135,6 +5049,46 @@ func truncateRunes(text string, limit int) string {
 		return text
 	}
 	return string(runes[:limit]) + "..."
+}
+
+func formatQuotaMetricName(key string) string {
+	switch key {
+	case "premium_interactions":
+		return "Premium Interactions"
+	case "ai_credits", "ai_credit", "ai-credits":
+		return "AI Credits"
+	default:
+		parts := strings.Split(key, "_")
+		for i, part := range parts {
+			if part == "" {
+				continue
+			}
+			parts[i] = strings.ToUpper(part[:1]) + strings.ToLower(part[1:])
+		}
+		return strings.Join(parts, " ")
+	}
+}
+
+func formatCompactCountSummary(counts map[string]int, maxItems int) string {
+	if len(counts) == 0 {
+		return "-"
+	}
+	if maxItems <= 0 {
+		maxItems = 3
+	}
+	items := sortedNamedCounts(counts)
+	parts := make([]string, 0, maxItems)
+	for i, item := range items {
+		if i >= maxItems {
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s×%d", item.Name, item.Count))
+	}
+	result := strings.Join(parts, ", ")
+	if len(items) > maxItems {
+		result += fmt.Sprintf(" +%d", len(items)-maxItems)
+	}
+	return result
 }
 
 func formatCountSummary(counts map[string]int) string {
@@ -6193,18 +7147,24 @@ func showTurnsV2(sessionID string, format string) {
 		if summary == "" {
 			summary = "-"
 		} else {
-			summary = truncateRunes(summary, 60)
+			summary = formatTableCellText(summary, 45)
+		}
+		modelCalls := formatCompactCountSummary(turn.ModelCalls, 2)
+		toolCalls := formatCompactCountSummary(turn.ToolCalls, 3)
+		if wrapLongText {
+			modelCalls = formatCountSummary(turn.ModelCalls)
+			toolCalls = formatCountSummary(turn.ToolCalls)
 		}
 
 		table.Append([]string{
 			strconv.Itoa(turn.TurnNumber),
 			strconv.Itoa(turn.SegmentNumber),
-			turn.TurnID,
+			shortID(turn.TurnID),
 			turn.StartTime.Local().Format("15:04:05"),
 			turn.durationString(lastEventTime),
 			turn.State,
-			formatCountSummary(turn.ModelCalls),
-			formatCountSummary(turn.ToolCalls),
+			modelCalls,
+			toolCalls,
 			summary,
 		})
 	}
@@ -6212,6 +7172,7 @@ func showTurnsV2(sessionID string, format string) {
 
 	fmt.Println("\nNotes:")
 	fmt.Println("- 'Turn #' is chronological within the session; raw 'Turn ID' can repeat.")
+	fmt.Println("- Table view shortens Turn ID, model/tool call lists, and Summary; use `-f yaml` for full values.")
 	if len(segments) > 1 {
 		fmt.Println("- 'Segment' increments on session.start or session.resume.")
 	}

@@ -1,10 +1,42 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/apstndb/copilot-show/pkg/analyze"
 )
+
+func TestFormatCompactCountSummary(t *testing.T) {
+	t.Parallel()
+
+	if got := formatCompactCountSummary(nil, 3); got != "-" {
+		t.Fatalf("formatCompactCountSummary(nil) = %q, want -", got)
+	}
+	got := formatCompactCountSummary(map[string]int{
+		"Read":  5,
+		"Shell": 3,
+		"Grep":  2,
+		"Write": 1,
+	}, 3)
+	if got != "Read×5, Shell×3, Grep×2 +1" {
+		t.Fatalf("formatCompactCountSummary() = %q, want compact top-N summary", got)
+	}
+}
+
+func TestFormatQuotaMetricName(t *testing.T) {
+	t.Parallel()
+
+	if got := formatQuotaMetricName("premium_interactions"); got != "Premium Interactions" {
+		t.Fatalf("formatQuotaMetricName(premium_interactions) = %q", got)
+	}
+	if got := formatQuotaMetricName("ai_credits"); got != "AI Credits" {
+		t.Fatalf("formatQuotaMetricName(ai_credits) = %q", got)
+	}
+	if got := formatQuotaMetricName("chat_completions"); got != "Chat Completions" {
+		t.Fatalf("formatQuotaMetricName(chat_completions) = %q", got)
+	}
+}
 
 func TestFirstLineTableText(t *testing.T) {
 	t.Parallel()
@@ -18,6 +50,59 @@ func TestFirstLineTableText(t *testing.T) {
 	long := "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz"
 	if got := firstLineTableText(long, 10); got != "abcdefghij..." {
 		t.Fatalf("firstLineTableText() = %q, want truncated", got)
+	}
+}
+
+func TestFormatTableCellText(t *testing.T) {
+	t.Parallel()
+
+	wrapLongText = false
+	t.Cleanup(func() { wrapLongText = false })
+
+	if got := formatTableCellText("line one\nline two", 80); got != "line one" {
+		t.Fatalf("formatTableCellText(compact) = %q, want first line only", got)
+	}
+
+	wrapLongText = true
+	if got := formatTableCellText("line one\nline two", 80); got != "line one\nline two" {
+		t.Fatalf("formatTableCellText(wrap) = %q, want full text", got)
+	}
+	if got := formatTableCellText("  ", 80); got != "-" {
+		t.Fatalf("formatTableCellText(wrap, blank) = %q, want -", got)
+	}
+}
+
+func TestFormatInlineScalarForTable(t *testing.T) {
+	t.Parallel()
+
+	wrapLongText = false
+	t.Cleanup(func() { wrapLongText = false })
+
+	long := strings.Repeat("x", 150)
+	if got := formatInlineScalarForTable(long); len([]rune(got)) != 123 {
+		t.Fatalf("formatInlineScalarForTable(compact) = %d runes, want 120 + ellipsis", len([]rune(got)))
+	}
+
+	wrapLongText = true
+	if got := formatInlineScalarForTable(long); got != long {
+		t.Fatalf("formatInlineScalarForTable(wrap) = %q, want full text", got)
+	}
+}
+
+func TestFormatSessionTableCell(t *testing.T) {
+	t.Parallel()
+
+	wrapLongText = false
+	t.Cleanup(func() { wrapLongText = false })
+
+	long := strings.Repeat("a", 20)
+	if got := formatSessionTableCell(long, 10); got != strings.Repeat("a", 10)+"\n"+strings.Repeat("a", 10) {
+		t.Fatalf("formatSessionTableCell(compact) = %q, want manual wrap", got)
+	}
+
+	wrapLongText = true
+	if got := formatSessionTableCell(long, 10); got != long {
+		t.Fatalf("formatSessionTableCell(wrap) = %q, want full text", got)
 	}
 }
 

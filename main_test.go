@@ -335,7 +335,7 @@ func TestBuildCLIFocusedModelDocsSnapshot(t *testing.T) {
 		},
 	}
 
-	got := buildCLIFocusedModelDocsSnapshot(snapshot)
+	got := buildCLIFocusedModelDocsSnapshot(snapshot, false)
 	if got.CatalogVersion != snapshot.CatalogVersion || got.SourceNote != snapshot.SourceNote || got.LoadedFrom != snapshot.LoadedFrom {
 		t.Fatalf("buildCLIFocusedModelDocsSnapshot() did not preserve top-level metadata: %#v", got)
 	}
@@ -486,8 +486,54 @@ func TestBuildRuntimeModelsSnapshotUsesSDKTokenPricing(t *testing.T) {
 	if got.Models[0].State != "enabled" || got.Models[0].PolicyTerms != "preview" {
 		t.Fatalf("buildRuntimeModelsSnapshot() policy = state %q terms %q", got.Models[0].State, got.Models[0].PolicyTerms)
 	}
+	if got.Models[0].BillingMultiplier == nil || *got.Models[0].BillingMultiplier != liveDocsMultiplier {
+		t.Fatalf("buildRuntimeModelsSnapshot() billing multiplier = %#v, want %v", got.Models[0].BillingMultiplier, liveDocsMultiplier)
+	}
 	if got.Models[1].TokenPricing != nil {
 		t.Fatalf("buildRuntimeModelsSnapshot() runtime-only token pricing = %#v, want nil", got.Models[1].TokenPricing)
+	}
+}
+
+func TestAuthInfoViewRedactsSecrets(t *testing.T) {
+	t.Parallel()
+
+	got := authInfoView(rpc.GhCLIAuthInfo{
+		Login: "octocat",
+		Host:  "https://github.com",
+		Token: "secret-token",
+		CopilotUser: &rpc.CopilotUserResponse{
+			CopilotPlan: strPtr("individual_pro"),
+		},
+	})
+	if got.Type != string(rpc.AuthInfoTypeGhCLI) {
+		t.Fatalf("authInfoView().Type = %q, want gh-cli", got.Type)
+	}
+	if got.Login != "octocat" || got.Host != "https://github.com" || got.CopilotPlan != "individual_pro" {
+		t.Fatalf("authInfoView() = %#v", got)
+	}
+	if !got.HasSecret {
+		t.Fatalf("authInfoView() HasSecret = false, want true")
+	}
+}
+
+func TestSummarizeMCPServerConfig(t *testing.T) {
+	t.Parallel()
+
+	stdio := summarizeMCPServerConfig("local", &rpc.MCPServerConfigStdio{
+		Command: "npx",
+		Args:    []string{"-y", "server"},
+	})
+	if stdio.Transport != "stdio" || stdio.Target != "npx -y server" {
+		t.Fatalf("summarizeMCPServerConfig(stdio) = %#v", stdio)
+	}
+
+	httpType := rpc.MCPServerConfigHTTPType("sse")
+	http := summarizeMCPServerConfig("remote", &rpc.MCPServerConfigHTTP{
+		URL:  "https://example.com/mcp",
+		Type: &httpType,
+	})
+	if http.Transport != "sse" || http.Target != "https://example.com/mcp" {
+		t.Fatalf("summarizeMCPServerConfig(http) = %#v", http)
 	}
 }
 
@@ -1121,5 +1167,225 @@ func TestConfigureShowHiddenHelp(t *testing.T) {
 	})
 	if !rootSecret.Hidden || !childSecret.Hidden || !hiddenCmd.Hidden {
 		t.Fatalf("withVisibleHiddenHelp() did not restore states: root=%v child=%v cmd=%v", rootSecret.Hidden, childSecret.Hidden, hiddenCmd.Hidden)
+	}
+}
+
+func TestCreateSessionConfigDiscoverFlag(t *testing.T) {
+	t.Parallel()
+
+	orig := enableConfigDiscovery
+	t.Cleanup(func() {
+		enableConfigDiscovery = orig
+	})
+
+	enableConfigDiscovery = false
+	cfg := createSessionConfig()
+	if cfg.EnableConfigDiscovery != nil {
+		t.Fatalf("expected EnableConfigDiscovery to be unset when --discover is off, got %v", *cfg.EnableConfigDiscovery)
+	}
+	if cfg.ClientName != copilotSDKClientName {
+		t.Fatalf("ClientName = %q, want %q", cfg.ClientName, copilotSDKClientName)
+	}
+
+	enableConfigDiscovery = true
+	cfg = createSessionConfig()
+	if cfg.EnableConfigDiscovery == nil || !*cfg.EnableConfigDiscovery {
+		t.Fatalf("expected EnableConfigDiscovery=true when --discover is on, got %#v", cfg.EnableConfigDiscovery)
+	}
+}
+
+func TestResumeSessionConfigDiscoverFlag(t *testing.T) {
+	t.Parallel()
+
+	orig := enableConfigDiscovery
+	t.Cleanup(func() {
+		enableConfigDiscovery = orig
+	})
+
+	enableConfigDiscovery = true
+	cfg := resumeSessionConfig()
+	if cfg.EnableConfigDiscovery == nil || !*cfg.EnableConfigDiscovery {
+		t.Fatalf("expected EnableConfigDiscovery=true when --discover is on, got %#v", cfg.EnableConfigDiscovery)
+	}
+	if !cfg.SuppressResumeEvent {
+		t.Fatal("expected SuppressResumeEvent to remain enabled for resumed diagnostics sessions")
+	}
+}
+
+func TestParseUsageBillingMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		raw   string
+		want  string
+		isErr bool
+	}{
+		{raw: "", want: usageBillingPremiumRequest},
+		{raw: "premium-request", want: usageBillingPremiumRequest},
+		{raw: "ai-credits", want: usageBillingAICredits},
+		{raw: "auto", want: usageBillingAuto},
+		{raw: "invalid", isErr: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.raw, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseUsageBillingMode(tc.raw)
+			if tc.isErr {
+				if err == nil {
+					t.Fatal("parseUsageBillingMode() expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseUsageBillingMode() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseUsageBillingMode(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildUsageAPIPath(t *testing.T) {
+	t.Parallel()
+
+	got := buildUsageAPIPath("octocat", 2026, 6, 15, "copilot", "gpt-5", usageBillingAICredits)
+	want := "/users/octocat/settings/billing/ai_credit/usage?year=2026&month=6&day=15&product=copilot&model=gpt-5"
+	if got != want {
+		t.Fatalf("buildUsageAPIPath(ai-credits) = %q, want %q", got, want)
+	}
+
+	got = buildUsageAPIPath("octocat", 2026, 0, 0, "", "", usageBillingPremiumRequest)
+	want = "/users/octocat/settings/billing/premium_request/usage?year=2026"
+	if got != want {
+		t.Fatalf("buildUsageAPIPath(premium-request) = %q, want %q", got, want)
+	}
+}
+
+func TestUsageQuantityColumnHeaders(t *testing.T) {
+	t.Parallel()
+
+	used, billed := usageQuantityColumnHeaders(usageBillingPremiumRequest)
+	if used != "Used (req.)" || billed != "Billed (req.)" {
+		t.Fatalf("premium headers = %q / %q", used, billed)
+	}
+
+	used, billed = usageQuantityColumnHeaders(usageBillingAICredits)
+	if used != "Used (credits)" || billed != "Billed (credits)" {
+		t.Fatalf("ai-credits headers = %q / %q", used, billed)
+	}
+}
+
+func TestResolveUsageBillingMode(t *testing.T) {
+	t.Parallel()
+
+	premium := &usageResponse{UsageItems: []struct {
+		Product          string  `json:"product" yaml:"product"`
+		SKU              string  `json:"sku" yaml:"sku"`
+		Model            string  `json:"model" yaml:"model"`
+		UnitType         string  `json:"unitType" yaml:"unitType"`
+		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
+		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
+		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
+		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
+		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
+		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
+		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
+	}{{Model: "gpt-5"}}}
+	aiCredits := &usageResponse{UsageItems: []struct {
+		Product          string  `json:"product" yaml:"product"`
+		SKU              string  `json:"sku" yaml:"sku"`
+		Model            string  `json:"model" yaml:"model"`
+		UnitType         string  `json:"unitType" yaml:"unitType"`
+		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
+		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
+		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
+		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
+		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
+		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
+		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
+	}{{UnitType: "ai-credits"}}}
+	quota := &rpc.AccountGetQuotaResult{
+		QuotaSnapshots: map[string]rpc.AccountQuotaSnapshot{
+			"ai_credits": {EntitlementRequests: 20000},
+		},
+	}
+
+	if got := resolveUsageBillingMode(usageBillingAICredits, nil, nil, nil); got != usageBillingAICredits {
+		t.Fatalf("explicit ai-credits = %q", got)
+	}
+	if got := resolveUsageBillingMode(usageBillingAuto, premium, aiCredits, quota); got != usageBillingAICredits {
+		t.Fatalf("auto with ai_credits quota snapshot = %q, want ai-credits", got)
+	}
+	if got := resolveUsageBillingMode(usageBillingAuto, premium, aiCredits, nil); got != usageBillingPremiumRequest {
+		t.Fatalf("auto with both datasets = %q, want premium-request", got)
+	}
+	if got := resolveUsageBillingMode(usageBillingAuto, nil, aiCredits, nil); got != usageBillingAICredits {
+		t.Fatalf("auto with only ai-credits data = %q", got)
+	}
+}
+
+func TestNanoAiuToCredits(t *testing.T) {
+	t.Parallel()
+
+	if got := nanoAiuToCredits(1_500_000_000); got != 1.5 {
+		t.Fatalf("nanoAiuToCredits() = %v, want 1.5", got)
+	}
+	if got := formatOptionalCredits(nil); got != "-" {
+		t.Fatalf("formatOptionalCredits(nil) = %q", got)
+	}
+	value := 754.52 * nanoAiuPerCredit
+	if got := formatOptionalCredits(&value); got != "754.52" {
+		t.Fatalf("formatOptionalCredits(754.52 credits) = %q", got)
+	}
+}
+
+func TestQuotaIncludedLimit(t *testing.T) {
+	t.Parallel()
+
+	quota := &rpc.AccountGetQuotaResult{
+		QuotaSnapshots: map[string]rpc.AccountQuotaSnapshot{
+			"premium_interactions": {EntitlementRequests: 300},
+			"ai_credits":           {EntitlementRequests: 20000},
+		},
+	}
+
+	if got := quotaIncludedLimit(quota, usageBillingPremiumRequest); got != 300 {
+		t.Fatalf("premium included = %v", got)
+	}
+	if got := quotaIncludedLimit(quota, usageBillingAICredits); got != 20000 {
+		t.Fatalf("ai credits included = %v", got)
+	}
+}
+
+func TestUsageResponseJSON(t *testing.T) {
+	t.Parallel()
+
+	raw := `{
+		"timePeriod": {"year": 2026, "month": 6},
+		"user": "octocat",
+		"usageItems": [{
+			"product": "copilot",
+			"sku": "copilot-chat",
+			"model": "gpt-5",
+			"unitType": "ai-credits",
+			"pricePerUnit": 0.01,
+			"grossQuantity": 754.52,
+			"netQuantity": 0,
+			"netAmount": 0
+		}]
+	}`
+
+	var res usageResponse
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(res.UsageItems) != 1 || res.UsageItems[0].UnitType != "ai-credits" {
+		t.Fatalf("parsed usage response = %#v", res)
+	}
+	if res.UsageItems[0].GrossQuantity != 754.52 {
+		t.Fatalf("grossQuantity = %v", res.UsageItems[0].GrossQuantity)
 	}
 }
