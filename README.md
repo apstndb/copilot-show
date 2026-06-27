@@ -27,10 +27,10 @@ Run the tool with a subcommand to inspect specific resources.
 
 Available subcommands:
 - `quota`: Show Copilot Premium Interactions usage and entitlement.
-- `models`: Show available models with live runtime details and docs-backed multipliers.
-- `model-docs`: Show CLI-focused model metadata from `github/docs`, with `--all` for broader docs-backed fields.
+- `models`: Show models returned by the live Copilot SDK `ListModels` call, with runtime limits, reasoning support, policy state, and `$ I/O` token pricing.
+- `model-docs`: Show docs-backed model metadata from `github/docs`, joined with the live CLI model list. Use `--all` for broader docs-backed fields.
 - `tools`: Show available tools.
-- `usage`: Show billing usage report from GitHub API, with model multipliers and entitlement joined from the models list and quota snapshots.
+- `usage`: Show billing usage report from GitHub API, with entitlement joined from quota snapshots.
 - `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
 - `turns`: Show turn-by-turn usage statistics for a session.
 
@@ -74,18 +74,24 @@ Month Progress (UTC): 38.8%
 
 ### List Models
 
-Lists available AI models with live runtime details such as token limits and reasoning support, while preferring the docs-backed paid multiplier table from `github/docs` for the multiplier column.
+Lists models returned by the local Copilot CLI server through the Copilot SDK `ListModels` API.
+The table includes runtime details such as token limits, reasoning support, vision limits, policy `State`, and `$ I/O` per-million-token pricing from SDK billing metadata.
+Use `-f yaml` for full SDK fields, including cache-read/write prices and docs catalog version metadata.
 
 ```bash
 copilot-show models
+
+# Try the latest github/docs tables for catalog version metadata
+copilot-show models --latest
 ```
 
 ### Model Docs
 
 Shows the docs-backed model matrix from `github/docs`, joined with the live CLI model list.
-By default it shows the docs-backed models that support Copilot CLI, including `Visible Now` and `Supported Plans` so you can compare what your account sees now with what other plans may expose.
-Use `--all` when you also want docs rows that do not support Copilot CLI, retired-model history, broader metadata such as Agent/Ask/Edit modes and task areas, and the full multi-client YAML surface.
-`Multiplier` prefers the docs-backed paid multiplier table and only falls back to live runtime billing when the docs snapshot has no multiplier for a visible row.
+By default it shows docs-backed models that support Copilot CLI, including `Visible Now` and compact `Supported Plans`.
+Use `--all` for the full docs catalog with summary counts, compact `Plans` and `Modes` columns, live `State`, and sorting that surfaces visible models first.
+Retired-model history and `Live Models Without Docs Snapshot Match` appear after the main table.
+`$ I/O` comes from live SDK billing metadata when a docs row matches a model in `ListModels`; otherwise it shows `-`.
 
 ```bash
 copilot-show model-docs
@@ -95,7 +101,26 @@ copilot-show model-docs --latest
 
 # Include broader docs-backed metadata
 copilot-show model-docs --all
+
+# Full docs catalog plus live join details
+copilot-show model-docs --all -f yaml
 ```
+
+#### Finding models you cannot select right now
+
+There is no separate Copilot SDK flag to list models outside your account entitlement.
+`copilot-show` combines two sources instead:
+
+| Goal | Command | What you get |
+| --- | --- | --- |
+| Everything your CLI server currently reports, including `policy.state` such as `disabled` | `copilot-show models` or `-f yaml` | Live SDK `ListModels` results only |
+| Docs-backed models that do not support Copilot CLI | `copilot-show model-docs --all` | Docs rows with `Copilot CLI: No` |
+| Docs-backed models your account does not currently see in `ListModels` | `copilot-show model-docs --all` | Docs rows with `Visible Now: No` |
+| Runtime models missing from the docs snapshot | `copilot-show model-docs` | `Live Models Without Docs Snapshot Match` section |
+| Models used in past local sessions but not visible now | `copilot-show stats` | Aggregated from `~/.copilot/session-state/*/events.jsonl` |
+
+For the broadest static catalog, use `copilot-show model-docs --all -f yaml`.
+Runtime billing and capability fields still come only from models returned by `ListModels`.
 
 ### List Tools
 
@@ -108,7 +133,7 @@ copilot-show tools
 ### Usage Report
 
 Shows detailed billing usage for premium requests from the GitHub API (requires `gh` CLI).
-Displays grouped results by Period and SKU with subtotals, multipliers, and entitlement information.
+Displays grouped results by Period and SKU with subtotals and entitlement information.
 Supports relative date/month/year by specifying negative values (e.g., `-d -1` for yesterday).
 Multiple periods can be shown with the `--last` flag.
 The `Period` column can be sorted in ascending or descending order with the `--sort-order` flag (default is `desc`).

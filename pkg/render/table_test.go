@@ -102,3 +102,45 @@ func TestDefaultTableMaxWidthDisableOverride(t *testing.T) {
 		t.Fatalf("defaultTableMaxWidth(default) with disable override = %d, want 0", got)
 	}
 }
+
+func TestDefaultTableMaxWidthFoldSkipsTerminalAutoWidth(t *testing.T) {
+	SetTableFoldEnabled(true)
+	t.Cleanup(func() { SetTableFoldEnabled(true) })
+	SetTableWidthOverride(0)
+	t.Cleanup(func() { SetTableWidthOverride(0) })
+
+	if got := defaultTableMaxWidth("default"); got != 0 {
+		t.Fatalf("defaultTableMaxWidth(default) with fold enabled = %d, want 0", got)
+	}
+}
+
+func TestDefaultTableMaxWidthLegacyUsesTerminalAutoWidth(t *testing.T) {
+	SetTableFoldEnabled(false)
+	t.Cleanup(func() { SetTableFoldEnabled(true) })
+	SetTableWidthOverride(0)
+	t.Cleanup(func() { SetTableWidthOverride(0) })
+
+	if got := defaultTableMaxWidth("default"); got != 0 {
+		t.Fatalf("defaultTableMaxWidth(default) with legacy layout = %d, want non-zero terminal width when available", got)
+	}
+}
+
+func TestNewTableFoldPreservesUnspacedTokens(t *testing.T) {
+	t.Parallel()
+
+	SetTableFoldEnabled(true)
+	t.Cleanup(func() { SetTableFoldEnabled(true) })
+
+	var buf bytes.Buffer
+	table := newTable(&buf, []string{"Identifier"}, nil, false, false, "default", 20)
+	table.Append([]string{"claude-sonnet-4.6"})
+	table.Render()
+
+	got := buf.String()
+	if !strings.Contains(got, "claude-sonnet-4.6") {
+		t.Fatalf("fold layout should preserve identifier:\n%s", got)
+	}
+	if strings.Contains(got, "claude-son\n") || strings.Contains(got, "son\nnet") {
+		t.Fatalf("fold layout should not break unspaced tokens across lines:\n%s", got)
+	}
+}

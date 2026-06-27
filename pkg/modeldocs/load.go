@@ -9,7 +9,6 @@ import (
 	"io/fs"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -64,18 +63,11 @@ type supportedClientsRow struct {
 
 type supportedPlansRow struct {
 	Name       string `yaml:"name"`
-	Free       bool   `yaml:"free"`
-	Student    bool   `yaml:"student"`
 	Pro        bool   `yaml:"pro"`
 	ProPlus    bool   `yaml:"pro_plus"`
+	Max        bool   `yaml:"max"`
 	Business   bool   `yaml:"business"`
 	Enterprise bool   `yaml:"enterprise"`
-}
-
-type modelMultiplierRow struct {
-	Name           string `yaml:"name"`
-	MultiplierPaid any    `yaml:"multiplier_paid"`
-	MultiplierFree any    `yaml:"multiplier_free"`
 }
 
 type modelComparisonRow struct {
@@ -93,12 +85,11 @@ type deprecationHistoryRow struct {
 
 func baseCatalogSources() Sources {
 	return Sources{
-		ReleaseStatus:      "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-release-status.yml",
-		SupportedClients:   "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-supported-clients.yml",
+		ReleaseStatus:                    "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-release-status.yml",
+		SupportedClients:                 "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-supported-clients.yml",
 		SupportedPlans:     "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-supported-plans.yml",
-		ModelMultipliers:   "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-multipliers.yml",
 		ModelComparison:    "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-comparison.yml",
-		DeprecationHistory: "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-deprecation-history.yml",
+		DeprecationHistory:               "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-deprecation-history.yml",
 	}
 }
 
@@ -144,10 +135,6 @@ func loadCatalogFromFS(fsys fs.FS) (docsCatalog, error) {
 	if err != nil {
 		return docsCatalog{}, err
 	}
-	modelMultipliersData, err := fs.ReadFile(fsys, embeddedSnapshotDir+"/model-multipliers.yml")
-	if err != nil {
-		return docsCatalog{}, err
-	}
 	modelComparisonData, err := fs.ReadFile(fsys, embeddedSnapshotDir+"/model-comparison.yml")
 	if err != nil {
 		return docsCatalog{}, err
@@ -158,7 +145,17 @@ func loadCatalogFromFS(fsys fs.FS) (docsCatalog, error) {
 	}
 
 	version := "github-docs-snapshot-" + shortSHA(metadata.Commit)
-	return parseDocsCatalog(releaseStatusData, supportedClientsData, supportedPlansData, modelMultipliersData, modelComparisonData, deprecationData, version, string(loadModeEmbedded), nil, sources)
+	return parseDocsCatalog(
+		releaseStatusData,
+		supportedClientsData,
+		supportedPlansData,
+		modelComparisonData,
+		deprecationData,
+		version,
+		string(loadModeEmbedded),
+		nil,
+		sources,
+	)
 }
 
 func loadLatestCatalog(ctx context.Context, fetcher latestFileFetcher, sources Sources) (docsCatalog, error) {
@@ -178,10 +175,6 @@ func loadLatestCatalog(ctx context.Context, fetcher latestFileFetcher, sources S
 	if err != nil {
 		return docsCatalog{}, err
 	}
-	modelMultipliersData, err := fetcher(ctx, sources.ModelMultipliers)
-	if err != nil {
-		return docsCatalog{}, err
-	}
 	modelComparisonData, err := fetcher(ctx, sources.ModelComparison)
 	if err != nil {
 		return docsCatalog{}, err
@@ -191,7 +184,17 @@ func loadLatestCatalog(ctx context.Context, fetcher latestFileFetcher, sources S
 		return docsCatalog{}, err
 	}
 
-	return parseDocsCatalog(releaseStatusData, supportedClientsData, supportedPlansData, modelMultipliersData, modelComparisonData, deprecationData, "github-docs-latest", string(loadModeLatest), nil, sources)
+	return parseDocsCatalog(
+		releaseStatusData,
+		supportedClientsData,
+		supportedPlansData,
+		modelComparisonData,
+		deprecationData,
+		"github-docs-latest",
+		string(loadModeLatest),
+		nil,
+		sources,
+	)
 }
 
 func loadEmbeddedSourceMetadata(fsys fs.FS) (embeddedSourceMetadata, error) {
@@ -209,17 +212,14 @@ func loadEmbeddedSourceMetadata(fsys fs.FS) (embeddedSourceMetadata, error) {
 	return metadata, nil
 }
 
-func parseDocsCatalog(releaseStatusData, supportedClientsData, supportedPlansData, modelMultipliersData, modelComparisonData, deprecationData []byte, version, loadedFrom string, warnings []string, sources Sources) (docsCatalog, error) {
+func parseDocsCatalog(releaseStatusData, supportedClientsData, supportedPlansData, modelComparisonData, deprecationData []byte, version, loadedFrom string, warnings []string, sources Sources) (docsCatalog, error) {
 	if err := validateRequiredKeys(releaseStatusData, "model-release-status.yml", []string{"name", "provider", "release_status", "agent_mode", "ask_mode", "edit_mode"}); err != nil {
 		return docsCatalog{}, err
 	}
 	if err := validateRequiredKeys(supportedClientsData, "model-supported-clients.yml", []string{"name", "dotcom", "cli", "vscode", "vs", "eclipse", "xcode", "jetbrains"}); err != nil {
 		return docsCatalog{}, err
 	}
-	if err := validateRequiredKeys(supportedPlansData, "model-supported-plans.yml", []string{"name", "free", "student", "pro", "pro_plus", "business", "enterprise"}); err != nil {
-		return docsCatalog{}, err
-	}
-	if err := validateRequiredKeys(modelMultipliersData, "model-multipliers.yml", []string{"name", "multiplier_paid", "multiplier_free"}); err != nil {
+	if err := validateRequiredKeys(supportedPlansData, "model-supported-plans.yml", []string{"name", "pro", "pro_plus", "max", "business", "enterprise"}); err != nil {
 		return docsCatalog{}, err
 	}
 	if err := validateRequiredKeys(modelComparisonData, "model-comparison.yml", []string{"name"}); err != nil {
@@ -244,10 +244,6 @@ func parseDocsCatalog(releaseStatusData, supportedClientsData, supportedPlansDat
 	var planRows []supportedPlansRow
 	if err := yaml.Unmarshal(supportedPlansData, &planRows); err != nil {
 		return docsCatalog{}, fmt.Errorf("decode model-supported-plans.yml: %w", err)
-	}
-	var multiplierRows []modelMultiplierRow
-	if err := yaml.Unmarshal(modelMultipliersData, &multiplierRows); err != nil {
-		return docsCatalog{}, fmt.Errorf("decode model-multipliers.yml: %w", err)
 	}
 	var comparisonRows []modelComparisonRow
 	if err := yaml.Unmarshal(modelComparisonData, &comparisonRows); err != nil {
@@ -280,26 +276,6 @@ func parseDocsCatalog(releaseStatusData, supportedClientsData, supportedPlansDat
 			return docsCatalog{}, fmt.Errorf("model-supported-plans.yml contains duplicate model %q", row.Name)
 		}
 		planMap[key] = row
-	}
-
-	multiplierMap := make(map[string]*RequestMultipliers, len(multiplierRows))
-	for _, row := range multiplierRows {
-		if strings.TrimSpace(row.Name) == "" {
-			return docsCatalog{}, fmt.Errorf("model-multipliers.yml contains an empty model name")
-		}
-		key := NormalizeModelNameKey(row.Name)
-		if _, exists := multiplierMap[key]; exists {
-			return docsCatalog{}, fmt.Errorf("model-multipliers.yml contains duplicate model %q", row.Name)
-		}
-		paid, err := parseOptionalMultiplierCell(row.MultiplierPaid, "model-multipliers.yml", row.Name, "multiplier_paid")
-		if err != nil {
-			return docsCatalog{}, err
-		}
-		free, err := parseOptionalMultiplierCell(row.MultiplierFree, "model-multipliers.yml", row.Name, "multiplier_free")
-		if err != nil {
-			return docsCatalog{}, err
-		}
-		multiplierMap[key] = &RequestMultipliers{Paid: paid, Free: free}
 	}
 
 	comparisonMap := make(map[string]modelComparisonRow, len(comparisonRows))
@@ -356,15 +332,13 @@ func parseDocsCatalog(releaseStatusData, supportedClientsData, supportedPlansDat
 				JetBrains: clientRow.JetBrains,
 			},
 			Plans: PlanAvailability{
-				Free:       planRow.Free,
-				Student:    planRow.Student,
 				Pro:        planRow.Pro,
 				ProPlus:    planRow.ProPlus,
+				Max:        planRow.Max,
 				Business:   planRow.Business,
 				Enterprise: planRow.Enterprise,
 			},
-			Multipliers: cloneRequestMultipliers(multiplierMap[key]),
-			Comparison:  comparison,
+			Comparison: comparison,
 		})
 	}
 
@@ -443,35 +417,4 @@ func validateRequiredKeys(data []byte, fileName string, requiredKeys []string) e
 		}
 	}
 	return nil
-}
-
-func parseOptionalMultiplierCell(value any, fileName, modelName, column string) (*float64, error) {
-	switch v := value.(type) {
-	case nil:
-		return nil, nil
-	case int:
-		parsed := float64(v)
-		return &parsed, nil
-	case int64:
-		parsed := float64(v)
-		return &parsed, nil
-	case uint64:
-		parsed := float64(v)
-		return &parsed, nil
-	case float64:
-		parsed := v
-		return &parsed, nil
-	case string:
-		text := strings.TrimSpace(v)
-		if text == "" || strings.EqualFold(text, "not applicable") {
-			return nil, nil
-		}
-		parsed, err := strconv.ParseFloat(text, 64)
-		if err != nil {
-			return nil, fmt.Errorf("%s model %q has invalid %s value %q: %w", fileName, modelName, column, text, err)
-		}
-		return &parsed, nil
-	default:
-		return nil, fmt.Errorf("%s model %q has unsupported %s value of type %T", fileName, modelName, column, value)
-	}
 }

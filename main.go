@@ -33,6 +33,9 @@ import (
 )
 
 const (
+	copilotSDKClientName = "copilot-show"
+	modelsAPIPricingColumnHeader = "$ I/O"
+
 	uiVersionOld = "old"
 	uiVersionNew = "new"
 
@@ -197,6 +200,7 @@ func main() {
 				return fmt.Errorf("invalid --ui-version %q: expected %q or %q", uiVersion, uiVersionOld, uiVersionNew)
 			}
 			render.SetTableWidthOverride(tableWidth)
+			render.SetTableFoldEnabled(uiVersion == uiVersionNew)
 			return nil
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -267,19 +271,21 @@ func printYAML(v interface{}) {
 func withSession(ctx context.Context, client *copilot.Client, fn func(session *copilot.Session) error) error {
 	cwd, _ := os.Getwd()
 	session, err := client.CreateSession(ctx, &copilot.SessionConfig{
+		ClientName:          copilotSDKClientName,
 		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
 		WorkingDirectory:    cwd,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
 	}
-	defer session.Destroy()
+	defer session.Disconnect()
 	return fn(session)
 }
 
 func withResumedSession(ctx context.Context, client *copilot.Client, sessionID string, fn func(session *copilot.Session) error) error {
 	session, err := client.ResumeSession(ctx, sessionID, &copilot.ResumeSessionConfig{
-		DisableResume:       true,
+		ClientName:          copilotSDKClientName,
+		SuppressResumeEvent: true,
 		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
 	})
 	if err != nil {
@@ -329,12 +335,7 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 			usagePct = fmt.Sprintf("%.1f%%", (float64(snap.UsedRequests)/float64(snap.EntitlementRequests))*100)
 		}
 		if snap.ResetDate != nil {
-			t, err := time.Parse(time.RFC3339, *snap.ResetDate)
-			if err == nil {
-				lastUpdatedSet[t.Local().Format(time.RFC3339)] = struct{}{}
-			} else {
-				lastUpdatedSet[*snap.ResetDate] = struct{}{}
-			}
+			lastUpdatedSet[snap.ResetDate.Local().Format(time.RFC3339)] = struct{}{}
 		}
 		overageVal := ""
 		if snap.OverageAllowedWithExhaustedQuota {
@@ -383,11 +384,13 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	// Add educational notes based on documentation
-	fmt.Println("\nPlan Reference (Included Monthly Premium Requests):")
-	fmt.Println("- Copilot Free: 50")
-	fmt.Println("- Copilot Pro / Business: 300")
-	fmt.Println("- Copilot Enterprise: 1,000")
+	fmt.Println("\nPlan Reference (legacy premium requests, github/docs):")
+	fmt.Println("- Copilot Pro: 300")
 	fmt.Println("- Copilot Pro+: 1,500")
+	fmt.Println("- Copilot Business: 300")
+	fmt.Println("- Copilot Enterprise: 1,000")
+	fmt.Println("- Copilot Max: see github/docs AI credits tables (20,000 total AI credits/month)")
+	fmt.Println("- Additional premium requests: $0.04 USD each when overage is enabled")
 
 	// Month progress calculation (UTC based, as per GitHub billing docs)
 	now := time.Now().UTC()
@@ -422,61 +425,65 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	fmt.Println("\nNotes:")
 	fmt.Println("- Quotas reset on the 1st of each month at 00:00 UTC.")
 	fmt.Println("- 'Overage' shows the extra usage after exhausting your included requests.")
-	fmt.Println("- Each interaction's cost depends on the model's multiplier.")
-	fmt.Println("- Standard models (e.g., GPT-4o, Claude 4.5 Sonnet) are often 'Included' at 0 cost.")
-	fmt.Println("- Premium models (e.g., Claude 4.6 Opus, o1) have a multiplier (e.g., 3x).")
+	fmt.Println("- Billing weights vary by model; session shutdown metrics preserve fractional premium-request totals.")
+	fmt.Println("- Live quota still reports premium_interactions from the Copilot SDK while GitHub rolls out AI credits on individual plans.")
 }
 
 func newModelsCmd(client *copilot.Client) *cobra.Command {
-	return &cobra.Command{
+	var useLatest bool
+	cmd := &cobra.Command{
 		Use:   "models",
 		Short: "List available AI models with details",
 		Run: func(cmd *cobra.Command, args []string) {
-			showModels(cmd.Context(), client, outputFormat)
+			showModels(cmd.Context(), client, outputFormat, useLatest)
 		},
 	}
+	cmd.Flags().BoolVar(&useLatest, "latest", false, "Attempt to fetch the latest github/docs Copilot tables before falling back to the embedded snapshot")
+	return cmd
 }
 
-func showModels(ctx context.Context, client *copilot.Client, format string) {
+func showModels(ctx context.Context, client *copilot.Client, format string, useLatest bool) {
 	models, err := client.ListModels(ctx)
 	if err != nil {
 		log.Printf("Error listing models: %v", err)
 		return
 	}
 
-	snapshot := modeldocs.BuildSnapshot(models)
+	snapshot, err := modeldocs.BuildSnapshotWithOptions(ctx, models, modeldocs.SnapshotOptions{PreferLatest: useLatest})
+	if err != nil {
+		log.Printf("Error loading model metadata snapshot: %v", err)
+		return
+	}
 	for _, warning := range snapshot.LoadWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning)
 	}
 	modelSnapshot := buildRuntimeModelsSnapshot(models, snapshot)
+	sortRuntimeModelViews(modelSnapshot.Models)
 
 	if format == "yaml" {
 		printYAML(modelSnapshot)
 		return
 	}
 
-	header := []string{"ID", "Name", "Multiplier", "Context", "Prompt", "Vision", "Reasoning", "Efforts", "State"}
-	table := render.CreateTable(header, []int{2, 3, 4}, false, false, tableMode)
+	header, rightAligned := modelsTableLayout()
+	table := render.CreateTable(header, rightAligned, false, false, tableMode)
 
 	for _, model := range modelSnapshot.Models {
-		table.Append([]string{
-			model.ID,
-			model.Name,
-			model.MultiplierDisplay,
-			strconv.Itoa(model.MaxContextWindowTokens),
-			formatOptionalTokenLimit(model.MaxPromptTokens),
-			boolYesNo(model.SupportsVision),
-			formatReasoningSupport(model.SupportsReasoning, model.DefaultReasoningEffort),
-			formatReasoningEfforts(model.SupportedReasoningEfforts),
-			formatOptionalText(model.State),
-		})
+		table.Append(modelsTableRow(model))
 	}
+	if len(modelSnapshot.Models) == 0 {
+		fmt.Println("No models returned by the Copilot SDK.")
+		return
+	}
+	fmt.Printf("Live models: %d from Copilot SDK `ListModels`\n", len(modelSnapshot.Models))
 	table.Render()
 	fmt.Println("\nNotes:")
-	fmt.Println("- `Multiplier` prefers the docs-backed paid multiplier from github/docs for docs-known models.")
-	fmt.Println("- Runtime-only models without a docs match fall back to the live Copilot SDK billing multiplier.")
-	fmt.Printf("- Multiplier catalog version: %s (%s)\n", modelSnapshot.ModelCatalogVersion, modelSnapshot.ModelCatalogLoadedFrom)
-	fmt.Println("- Free-plan multipliers are loaded too, but `models` currently displays the paid-plan column.")
+	fmt.Println("- `$ I/O` shows per-million-token input/output USD from Copilot SDK `ListModels` billing.")
+	fmt.Println("- `Efforts` marks the default reasoning effort with `*` when the model reports one.")
+	fmt.Println("- `Vision` shows image count and size in the table; supported media types are in YAML output.")
+	fmt.Println("- `Context` and `Prompt` use compact token counts (for example 936k, 1M).")
+	fmt.Println("- Cache-read/write prices remain in YAML output.")
+	fmt.Printf("- Docs metadata catalog version: %s (%s)\n", modelSnapshot.ModelCatalogVersion, modelSnapshot.ModelCatalogLoadedFrom)
 	if len(modelSnapshot.ModelCatalogWarnings) > 0 {
 		fmt.Println("- Warnings:")
 		for _, warning := range modelSnapshot.ModelCatalogWarnings {
@@ -486,138 +493,116 @@ func showModels(ctx context.Context, client *copilot.Client, format string) {
 }
 
 type runtimeModelsSnapshot struct {
-	ModelCatalogSource     string             `json:"modelCatalogSource" yaml:"modelCatalogSource"`
 	ModelCatalogVersion    string             `json:"modelCatalogVersion,omitempty" yaml:"modelCatalogVersion,omitempty"`
 	ModelCatalogLoadedFrom string             `json:"modelCatalogLoadedFrom,omitempty" yaml:"modelCatalogLoadedFrom,omitempty"`
 	ModelCatalogWarnings   []string           `json:"modelCatalogWarnings,omitempty" yaml:"modelCatalogWarnings,omitempty"`
-	MultiplierPlan         string             `json:"multiplierPlan" yaml:"multiplierPlan"`
 	Models                 []runtimeModelView `json:"models" yaml:"models"`
 }
 
 type runtimeModelView struct {
-	ID                        string                        `json:"id" yaml:"id"`
-	Name                      string                        `json:"name" yaml:"name"`
-	MultiplierDisplay         string                        `json:"multiplierDisplay" yaml:"multiplierDisplay"`
-	SelectedMultiplier        *float64                      `json:"selectedMultiplier,omitempty" yaml:"selectedMultiplier,omitempty"`
-	MultiplierSource          string                        `json:"multiplierSource" yaml:"multiplierSource"`
-	DocsMultipliers           *modeldocs.RequestMultipliers `json:"docsMultipliers,omitempty" yaml:"docsMultipliers,omitempty"`
-	LiveMultiplier            *float64                      `json:"liveMultiplier,omitempty" yaml:"liveMultiplier,omitempty"`
-	MaxContextWindowTokens    int                           `json:"maxContextWindowTokens" yaml:"maxContextWindowTokens"`
-	MaxPromptTokens           *int                          `json:"maxPromptTokens,omitempty" yaml:"maxPromptTokens,omitempty"`
-	SupportsVision            bool                          `json:"supportsVision" yaml:"supportsVision"`
-	SupportsReasoning         bool                          `json:"supportsReasoning" yaml:"supportsReasoning"`
-	DefaultReasoningEffort    string                        `json:"defaultReasoningEffort,omitempty" yaml:"defaultReasoningEffort,omitempty"`
-	SupportedReasoningEfforts []string                      `json:"supportedReasoningEfforts,omitempty" yaml:"supportedReasoningEfforts,omitempty"`
-	State                     string                        `json:"state,omitempty" yaml:"state,omitempty"`
+	ID                        string                     `json:"id" yaml:"id"`
+	Name                      string                     `json:"name" yaml:"name"`
+	TokenPricing              *modeldocs.SDKTokenPricing `json:"tokenPricing,omitempty" yaml:"tokenPricing,omitempty"`
+	MaxContextWindowTokens    int                        `json:"maxContextWindowTokens" yaml:"maxContextWindowTokens"`
+	MaxPromptTokens           *int                       `json:"maxPromptTokens,omitempty" yaml:"maxPromptTokens,omitempty"`
+	SupportsVision            bool                       `json:"supportsVision" yaml:"supportsVision"`
+	VisionLimits              *copilot.ModelVisionLimits `json:"visionLimits,omitempty" yaml:"visionLimits,omitempty"`
+	SupportsReasoning         bool                       `json:"supportsReasoning" yaml:"supportsReasoning"`
+	DefaultReasoningEffort    string                     `json:"defaultReasoningEffort,omitempty" yaml:"defaultReasoningEffort,omitempty"`
+	SupportedReasoningEfforts []string                   `json:"supportedReasoningEfforts,omitempty" yaml:"supportedReasoningEfforts,omitempty"`
+	State                     string                     `json:"state,omitempty" yaml:"state,omitempty"`
+	PolicyTerms               string                     `json:"policyTerms,omitempty" yaml:"policyTerms,omitempty"`
 }
 
 func buildRuntimeModelsSnapshot(models []copilot.ModelInfo, snapshot modeldocs.Snapshot) runtimeModelsSnapshot {
-	docsMultipliers := buildDocsMultiplierMap(snapshot.Models)
 	result := runtimeModelsSnapshot{
-		ModelCatalogSource:     snapshot.Sources.ModelMultipliers,
 		ModelCatalogVersion:    snapshot.CatalogVersion,
 		ModelCatalogLoadedFrom: snapshot.LoadedFrom,
 		ModelCatalogWarnings:   append([]string(nil), snapshot.LoadWarnings...),
-		MultiplierPlan:         "paid",
 		Models:                 make([]runtimeModelView, 0, len(models)),
 	}
 	for _, model := range models {
-		docsMultiplier := lookupDocsMultipliers(model, docsMultipliers)
-		liveMultiplier := liveBillingMultiplier(model)
-		selectedMultiplier, multiplierSource := selectModelMultiplier(docsMultiplier, liveMultiplier)
+		tokenPricing := modeldocs.SDKTokenPricingFromModel(model)
 
 		supportsVision := model.Capabilities.Supports.Vision
 		supportsReasoning := model.Capabilities.Supports.ReasoningEffort
 
 		policyState := ""
+		policyTerms := ""
 		if model.Policy != nil {
 			policyState = model.Policy.State
+			policyTerms = model.Policy.Terms
 		}
 
 		result.Models = append(result.Models, runtimeModelView{
 			ID:                        model.ID,
 			Name:                      model.Name,
-			MultiplierDisplay:         formatMultiplierValue(selectedMultiplier),
-			SelectedMultiplier:        cloneOptionalFloat(selectedMultiplier),
-			MultiplierSource:          multiplierSource,
-			DocsMultipliers:           cloneModeldocsRequestMultipliers(docsMultiplier),
-			LiveMultiplier:            cloneOptionalFloat(liveMultiplier),
-			MaxContextWindowTokens:    model.Capabilities.Limits.MaxContextWindowTokens,
+			TokenPricing:              cloneSDKTokenPricing(tokenPricing),
+			MaxContextWindowTokens:    intFromPtr(model.Capabilities.Limits.MaxContextWindowTokens),
 			MaxPromptTokens:           cloneOptionalInt(model.Capabilities.Limits.MaxPromptTokens),
 			SupportsVision:            supportsVision,
+			VisionLimits:              cloneModelVisionLimits(model.Capabilities.Limits.Vision),
 			SupportsReasoning:         supportsReasoning,
 			DefaultReasoningEffort:    model.DefaultReasoningEffort,
 			SupportedReasoningEfforts: append([]string(nil), model.SupportedReasoningEfforts...),
 			State:                     policyState,
+			PolicyTerms:               policyTerms,
 		})
 	}
 	return result
 }
 
-func buildDocsMultiplierMap(models []modeldocs.JoinedModel) map[string]*modeldocs.RequestMultipliers {
-	multipliers := make(map[string]*modeldocs.RequestMultipliers, len(models))
-	for _, model := range models {
-		key := modeldocs.NormalizeModelNameKey(model.Name)
-		if key == "" || model.Multipliers == nil {
-			continue
+func sortStatsModels(models []string, stats map[string]*analyze.ModelStat) {
+	sort.Slice(models, func(i, j int) bool {
+		left := stats[models[i]]
+		right := stats[models[j]]
+		if left.Cost != right.Cost {
+			return left.Cost > right.Cost
 		}
-		multipliers[key] = model.Multipliers
-	}
-	return multipliers
+		if left.Requests != right.Requests {
+			return left.Requests > right.Requests
+		}
+		return models[i] < models[j]
+	})
 }
 
-func lookupDocsMultipliers(model copilot.ModelInfo, multipliers map[string]*modeldocs.RequestMultipliers) *modeldocs.RequestMultipliers {
-	nameKey := modeldocs.NormalizeModelNameKey(model.Name)
-	if multipliers[nameKey] != nil {
-		return multipliers[nameKey]
-	}
-	idKey := modeldocs.NormalizeModelNameKey(model.ID)
-	if idKey != "" {
-		return multipliers[idKey]
-	}
-	return nil
+func sortRuntimeModelViews(models []runtimeModelView) {
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].ID == "auto" {
+			return false
+		}
+		if models[j].ID == "auto" {
+			return true
+		}
+		if models[i].Name == models[j].Name {
+			return models[i].ID < models[j].ID
+		}
+		return natural.Less(strings.ToLower(models[i].Name), strings.ToLower(models[j].Name))
+	})
 }
 
-func liveBillingMultiplier(model copilot.ModelInfo) *float64 {
-	if model.Billing == nil {
+func cloneSDKTokenPricing(pricing *modeldocs.SDKTokenPricing) *modeldocs.SDKTokenPricing {
+	if pricing == nil {
 		return nil
 	}
-	multiplier := model.Billing.Multiplier
-	return &multiplier
-}
-
-func selectModelMultiplier(docsMultiplier *modeldocs.RequestMultipliers, liveMultiplier *float64) (*float64, string) {
-	if docsMultiplier != nil && docsMultiplier.Paid != nil {
-		return docsMultiplier.Paid, "github/docs paid"
+	cloned := &modeldocs.SDKTokenPricing{}
+	if pricing.InputUSDPerMTok != nil {
+		value := *pricing.InputUSDPerMTok
+		cloned.InputUSDPerMTok = &value
 	}
-	if liveMultiplier != nil {
-		return liveMultiplier, "copilot-sdk live"
+	if pricing.CachedInputUSDPerMTok != nil {
+		value := *pricing.CachedInputUSDPerMTok
+		cloned.CachedInputUSDPerMTok = &value
 	}
-	return nil, "unavailable"
-}
-
-func cloneModeldocsRequestMultipliers(multipliers *modeldocs.RequestMultipliers) *modeldocs.RequestMultipliers {
-	if multipliers == nil {
-		return nil
+	if pricing.CacheWriteUSDPerMTok != nil {
+		value := *pricing.CacheWriteUSDPerMTok
+		cloned.CacheWriteUSDPerMTok = &value
 	}
-	cloned := &modeldocs.RequestMultipliers{}
-	if multipliers.Paid != nil {
-		paid := *multipliers.Paid
-		cloned.Paid = &paid
-	}
-	if multipliers.Free != nil {
-		free := *multipliers.Free
-		cloned.Free = &free
+	if pricing.OutputUSDPerMTok != nil {
+		value := *pricing.OutputUSDPerMTok
+		cloned.OutputUSDPerMTok = &value
 	}
 	return cloned
-}
-
-func cloneOptionalFloat(value *float64) *float64 {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
 }
 
 func cloneOptionalInt(value *int) *int {
@@ -628,28 +613,258 @@ func cloneOptionalInt(value *int) *int {
 	return &cloned
 }
 
+func intFromPtr(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
 func formatOptionalTokenLimit(value *int) string {
+	if value == nil {
+		return "-"
+	}
+	return formatTokenCount(*value)
+}
+
+func formatTokenCount(value int) string {
+	if value <= 0 {
+		return "-"
+	}
+	switch {
+	case value >= 1_000_000:
+		if value%1_000_000 == 0 {
+			return fmt.Sprintf("%dM", value/1_000_000)
+		}
+		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
+	case value >= 10_000:
+		if value%1_000 == 0 {
+			return fmt.Sprintf("%dk", value/1_000)
+		}
+		return fmt.Sprintf("%.0fk", float64(value)/1_000)
+	default:
+		return strconv.Itoa(value)
+	}
+}
+
+func formatOptionalInt(value *int) string {
 	if value == nil {
 		return "-"
 	}
 	return strconv.Itoa(*value)
 }
 
-func formatReasoningSupport(supported bool, defaultEffort string) string {
+func formatReasoningSupport(supported bool) string {
 	if !supported {
 		return "No"
 	}
-	if defaultEffort == "" {
-		return "Yes"
-	}
-	return fmt.Sprintf("Yes (%s)", defaultEffort)
+	return "Yes"
 }
 
-func formatReasoningEfforts(efforts []string) string {
+func cloneModelVisionLimits(limits *copilot.ModelVisionLimits) *copilot.ModelVisionLimits {
+	if limits == nil {
+		return nil
+	}
+	cloned := *limits
+	if len(limits.SupportedMediaTypes) > 0 {
+		cloned.SupportedMediaTypes = append([]string(nil), limits.SupportedMediaTypes...)
+	}
+	return &cloned
+}
+
+func formatVisionSupport(supported bool, limits *copilot.ModelVisionLimits) string {
+	if !supported {
+		return "No"
+	}
+	if limits == nil {
+		return "Yes"
+	}
+	var details []string
+	if limits.MaxPromptImages > 0 {
+		details = append(details, formatImageCount(limits.MaxPromptImages))
+	}
+	if limits.MaxPromptImageSize > 0 {
+		details = append(details, formatByteSize(limits.MaxPromptImageSize))
+	}
+	if len(details) == 0 {
+		return "Yes"
+	}
+	return "Yes (" + strings.Join(details, ", ") + ")"
+}
+
+func formatImageCount(count int) string {
+	if count == 1 {
+		return "1 image"
+	}
+	return fmt.Sprintf("%d images", count)
+}
+
+func formatReasoningEffortsForTable(efforts []string, defaultEffort string) string {
 	if len(efforts) == 0 {
 		return "-"
 	}
-	return strings.Join(efforts, ", ")
+	labeled := make([]string, len(efforts))
+	for i, effort := range efforts {
+		labeled[i] = effort
+		if defaultEffort != "" && strings.EqualFold(effort, defaultEffort) {
+			labeled[i] = effort + "*"
+		}
+	}
+	return strings.Join(labeled, ", ")
+}
+
+func formatByteSize(bytes int) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := int64(bytes) / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func modelsTableLayout() (header []string, rightAligned []int) {
+	return []string{"ID", "Name", modelsAPIPricingColumnHeader, "Context", "Prompt", "Vision", "Reasoning", "Efforts", "State"}, []int{3, 4}
+}
+
+func modelsTableRow(model runtimeModelView) []string {
+	return []string{
+		model.ID,
+		model.Name,
+		formatSDKTokenPricingSummary(model.TokenPricing),
+		formatTokenCount(model.MaxContextWindowTokens),
+		formatOptionalTokenLimit(model.MaxPromptTokens),
+		formatVisionSupport(model.SupportsVision, model.VisionLimits),
+		formatReasoningSupport(model.SupportsReasoning),
+		formatReasoningEffortsForTable(model.SupportedReasoningEfforts, model.DefaultReasoningEffort),
+		formatOptionalText(model.State),
+	}
+}
+
+func formatModelDocsBilling(model modeldocs.JoinedModel) string {
+	return formatSDKTokenPricingSummary(firstJoinedModelTokenPricing(model))
+}
+
+func firstJoinedModelTokenPricing(model modeldocs.JoinedModel) *modeldocs.SDKTokenPricing {
+	for _, live := range model.LiveModels {
+		if live.TokenPricing != nil {
+			return live.TokenPricing
+		}
+	}
+	return nil
+}
+
+func formatSupportedPlansCompact(plans []string) string {
+	if len(plans) == 0 {
+		return "-"
+	}
+	return strings.Join(plans, ", ")
+}
+
+func formatModelDocsModes(modes modeldocs.ModeAvailability) string {
+	var names []string
+	if modes.Agent {
+		names = append(names, "agent")
+	}
+	if modes.Ask {
+		names = append(names, "ask")
+	}
+	if modes.Edit {
+		names = append(names, "edit")
+	}
+	if len(names) == 0 {
+		return "-"
+	}
+	return strings.Join(names, ", ")
+}
+
+func firstJoinedModelPolicyState(model modeldocs.JoinedModel) string {
+	for _, live := range model.LiveModels {
+		if strings.TrimSpace(live.PolicyState) != "" {
+			return live.PolicyState
+		}
+	}
+	return "-"
+}
+
+func modelDocsCLISummary(models []modeldocs.JoinedModel) string {
+	visible := 0
+	for _, model := range models {
+		if model.VisibleNow {
+			visible++
+		}
+	}
+	return fmt.Sprintf(
+		"Copilot CLI docs: %d models · %d visible now · %d not visible",
+		len(models),
+		visible,
+		len(models)-visible,
+	)
+}
+
+func modelDocsCatalogSummary(models []modeldocs.JoinedModel, retiredCount, liveWithoutDocsCount int) string {
+	visible := 0
+	cli := 0
+	for _, model := range models {
+		if model.VisibleNow {
+			visible++
+		}
+		if model.Clients.CLI {
+			cli++
+		}
+	}
+	return fmt.Sprintf(
+		"Docs catalog: %d models · %d visible now · %d not visible · %d Copilot CLI · %d retired · %d live without docs match",
+		len(models),
+		visible,
+		len(models)-visible,
+		cli,
+		retiredCount,
+		liveWithoutDocsCount,
+	)
+}
+
+func sortJoinedModelsForDisplay(models []modeldocs.JoinedModel) {
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].VisibleNow != models[j].VisibleNow {
+			return models[i].VisibleNow
+		}
+		if models[i].Clients.CLI != models[j].Clients.CLI {
+			return models[i].Clients.CLI
+		}
+		if models[i].Provider != models[j].Provider {
+			return models[i].Provider < models[j].Provider
+		}
+		return models[i].Name < models[j].Name
+	})
+}
+
+func modelDocsTableRow(model modeldocs.JoinedModel, showAll bool) []string {
+	supportedPlans := formatSupportedPlansCompact(model.Plans.SupportedPlanNames())
+	if showAll {
+		return []string{
+			model.Name,
+			model.Provider,
+			model.ReleaseStatus,
+			formatModelDocsBilling(model),
+			boolYesNo(model.Clients.CLI),
+			boolYesNo(model.VisibleNow),
+			firstJoinedModelPolicyState(model),
+			supportedPlans,
+			formatModelDocsModes(model.Modes),
+		}
+	}
+	return []string{
+		model.Name,
+		model.Provider,
+		model.ReleaseStatus,
+		formatModelDocsBilling(model),
+		boolYesNo(model.VisibleNow),
+		supportedPlans,
+	}
 }
 
 func formatOptionalText(value string) string {
@@ -699,51 +914,33 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 		return
 	}
 
-	header := []string{"Name", "Provider", "Release", "Multiplier", "Visible Now", "Supported Plans"}
+	billingHeader := modelsAPIPricingColumnHeader
 	displayModels := cliModels
 	if showAll {
-		header = []string{"Name", "Provider", "Release", "Multiplier", "Copilot CLI", "Visible Now", "Supported Plans", "Agent", "Ask", "Edit", "Task Area"}
-		displayModels = snapshot.Models
-	}
-	table := render.CreateTable(header, nil, false, false, tableMode)
-	for _, model := range displayModels {
-		taskArea := "-"
-		if model.Comparison != nil && model.Comparison.TaskArea != "" {
-			taskArea = model.Comparison.TaskArea
+		displayModels = append([]modeldocs.JoinedModel(nil), snapshot.Models...)
+		sortJoinedModelsForDisplay(displayModels)
+		fmt.Println(modelDocsCatalogSummary(displayModels, len(snapshot.RetiredModels), len(snapshot.LiveModelsWithoutDocs)))
+		header := []string{"Name", "Provider", "Release", billingHeader, "CLI", "Visible", "State", "Plans", "Modes"}
+		table := render.CreateTable(header, nil, false, false, tableMode)
+		for _, model := range displayModels {
+			table.Append(modelDocsTableRow(model, true))
 		}
-
-		planNames := model.Plans.SupportedPlanNames()
-		supportedPlans := "-"
-		if len(planNames) > 0 {
-			supportedPlans = strings.Join(planNames, ", ")
+		table.Render()
+	} else {
+		displayModels = append([]modeldocs.JoinedModel(nil), cliModels...)
+		sortJoinedModelsForDisplay(displayModels)
+		fmt.Println(modelDocsCLISummary(displayModels))
+		header := []string{"Name", "Provider", "Release", billingHeader, "Visible", "Plans"}
+		table := render.CreateTable(header, nil, false, false, tableMode)
+		for _, model := range displayModels {
+			table.Append(modelDocsTableRow(model, false))
 		}
-
-		if showAll {
-			table.Append([]string{
-				model.Name,
-				model.Provider,
-				model.ReleaseStatus,
-				formatJoinedModelMultiplier(model),
-				boolYesNo(model.Clients.CLI),
-				boolYesNo(model.VisibleNow),
-				supportedPlans,
-				boolYesNo(model.Modes.Agent),
-				boolYesNo(model.Modes.Ask),
-				boolYesNo(model.Modes.Edit),
-				taskArea,
-			})
+		if len(displayModels) == 0 {
+			fmt.Println("No docs-backed models with Copilot CLI support found.")
 		} else {
-			table.Append([]string{
-				model.Name,
-				model.Provider,
-				model.ReleaseStatus,
-				formatJoinedModelMultiplier(model),
-				boolYesNo(model.VisibleNow),
-				supportedPlans,
-			})
+			table.Render()
 		}
 	}
-	table.Render()
 
 	if showAll && len(snapshot.RetiredModels) > 0 {
 		fmt.Println("\nRetired Models:")
@@ -756,13 +953,13 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 
 	if len(snapshot.LiveModelsWithoutDocs) > 0 {
 		fmt.Println("\nLive Models Without Docs Snapshot Match:")
-		liveTable := render.CreateTable([]string{"ID", "Name", "State", "Multiplier"}, nil, false, false, tableMode)
+		liveTable := render.CreateTable([]string{"ID", "Name", "State", modelsAPIPricingColumnHeader}, nil, false, false, tableMode)
 		for _, model := range snapshot.LiveModelsWithoutDocs {
 			state := "-"
 			if model.PolicyState != "" {
 				state = model.PolicyState
 			}
-			liveTable.Append([]string{model.ID, model.Name, state, formatModelDocsLiveMultipliers([]modeldocs.LiveMatch{model})})
+			liveTable.Append([]string{model.ID, model.Name, state, modeldocs.SDKTokenPricingIOSummary(model.TokenPricing)})
 		}
 		liveTable.Render()
 	}
@@ -771,19 +968,18 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 	fmt.Printf("- Catalog version: %s\n", snapshot.CatalogVersion)
 	fmt.Printf("- Loaded from: %s\n", snapshot.LoadedFrom)
 	fmt.Println("- This command uses an embedded snapshot refreshed from github/docs at a recorded commit; `scripts/update-modeldocs-snapshot.sh` refreshes it, and `--latest` attempts fresh github/docs data with embedded fallback on fetch or compatibility errors.")
-	fmt.Println("- `Multiplier` prefers the docs-backed paid multiplier from github/docs and only falls back to live CLI billing when the docs snapshot has no multiplier for a visible row.")
+	fmt.Println("- `$ I/O` uses Copilot SDK `ListModels` billing token prices.")
 	fmt.Println("- `Visible Now` comes from the local Copilot CLI server and can vary by plan, organization policy, rollout, and account state.")
 	if showAll {
-		fmt.Println("- `Copilot CLI` comes from the docs-supported client matrix.")
-		fmt.Println("- `Provider`, `Agent`, `Ask`, `Edit`, and `Task Area` come from docs-backed model metadata.")
+		fmt.Println("- `CLI` and `Visible` come from the docs client matrix and your local `ListModels` results.")
+		fmt.Println("- `State` shows live SDK policy state when the docs row matches a runtime model.")
+		fmt.Println("- `Plans` and `Modes` come from docs-backed model metadata; task areas and per-client details are in `-f yaml`.")
+		fmt.Println("- Rows sort with visible models first, then Copilot CLI support, provider, and name.")
 		fmt.Println("- Retired models are listed only with `--all`.")
-		fmt.Println("- Free-plan multipliers are stored in YAML too, but this command currently displays the paid-plan multiplier column.")
 		fmt.Println("- Use `-f yaml` for the full provider, mode, per-client, per-plan, and model-card metadata.")
 	} else {
 		fmt.Printf("- Showing %d docs-backed models that support Copilot CLI.\n", len(cliModels))
 		fmt.Println("- Models without Copilot CLI support and retired-model history are hidden by default. Use `--all` to include them and expose broader docs-backed metadata.")
-		fmt.Println("- Free-plan multipliers are stored in YAML too, but this command currently displays the paid-plan multiplier column.")
-		fmt.Println("- Use `-f yaml --all` for the full provider, mode, per-client, per-plan, and model-card metadata.")
 	}
 	if len(snapshot.LoadWarnings) > 0 {
 		fmt.Println("- Warnings:")
@@ -804,45 +1000,8 @@ func copilotCLIModelDocs(models []modeldocs.JoinedModel) []modeldocs.JoinedModel
 	return cliModels
 }
 
-func formatModelDocsLiveMultipliers(matches []modeldocs.LiveMatch) string {
-	if len(matches) == 0 {
-		return "-"
-	}
-
-	seen := make(map[string]struct{}, len(matches))
-	values := make([]string, 0, len(matches))
-	for _, match := range matches {
-		if match.BillingMultiplier == nil {
-			continue
-		}
-		value := formatMultiplierValue(match.BillingMultiplier)
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		values = append(values, value)
-	}
-	if len(values) == 0 {
-		return "-"
-	}
-	return strings.Join(values, ", ")
-}
-
-func formatJoinedModelMultiplier(model modeldocs.JoinedModel) string {
-	if model.Multipliers != nil && model.Multipliers.Paid != nil {
-		return formatMultiplierValue(model.Multipliers.Paid)
-	}
-	return formatModelDocsLiveMultipliers(model.LiveModels)
-}
-
-func formatMultiplierValue(multiplier *float64) string {
-	if multiplier == nil {
-		return "-"
-	}
-	if *multiplier == 0 {
-		return "Included (0)"
-	}
-	return strconv.FormatFloat(*multiplier, 'f', -1, 64)
+func formatSDKTokenPricingSummary(pricing *modeldocs.SDKTokenPricing) string {
+	return modeldocs.SDKTokenPricingIOSummary(pricing)
 }
 
 type cliFocusedModelDocsSnapshot struct {
@@ -856,13 +1015,13 @@ type cliFocusedModelDocsSnapshot struct {
 }
 
 type cliFocusedModelDocs struct {
-	Name          string                        `json:"name" yaml:"name"`
-	Provider      string                        `json:"provider" yaml:"provider"`
-	ReleaseStatus string                        `json:"releaseStatus" yaml:"releaseStatus"`
-	VisibleNow    bool                          `json:"visibleNow" yaml:"visibleNow"`
-	Plans         modeldocs.PlanAvailability    `json:"plans" yaml:"plans"`
-	Multipliers   *modeldocs.RequestMultipliers `json:"multipliers,omitempty" yaml:"multipliers,omitempty"`
-	LiveModels    []modeldocs.LiveMatch         `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
+	Name          string                     `json:"name" yaml:"name"`
+	Provider      string                     `json:"provider" yaml:"provider"`
+	ReleaseStatus string                     `json:"releaseStatus" yaml:"releaseStatus"`
+	VisibleNow    bool                       `json:"visibleNow" yaml:"visibleNow"`
+	Plans         modeldocs.PlanAvailability `json:"plans" yaml:"plans"`
+	TokenPricing  *modeldocs.SDKTokenPricing `json:"tokenPricing,omitempty" yaml:"tokenPricing,omitempty"`
+	LiveModels    []modeldocs.LiveMatch      `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
 }
 
 func buildCLIFocusedModelDocsSnapshot(snapshot modeldocs.Snapshot) cliFocusedModelDocsSnapshot {
@@ -875,7 +1034,7 @@ func buildCLIFocusedModelDocsSnapshot(snapshot modeldocs.Snapshot) cliFocusedMod
 			ReleaseStatus: model.ReleaseStatus,
 			VisibleNow:    model.VisibleNow,
 			Plans:         model.Plans,
-			Multipliers:   cloneModeldocsRequestMultipliers(model.Multipliers),
+			TokenPricing:  cloneSDKTokenPricing(firstJoinedModelTokenPricing(model)),
 			LiveModels:    append([]modeldocs.LiveMatch(nil), model.LiveModels...),
 		})
 	}
@@ -919,6 +1078,11 @@ func showTools(ctx context.Context, client *copilot.Client, format string) {
 		return
 	}
 
+	if len(tools.Tools) == 0 {
+		fmt.Println("No built-in tools found.")
+		return
+	}
+
 	header := []string{"Name", "Description", "Namespaced Name"}
 	table := render.CreateTable(header, nil, false, false, tableMode)
 
@@ -927,7 +1091,7 @@ func showTools(ctx context.Context, client *copilot.Client, format string) {
 		if t.NamespacedName != nil {
 			nsName = *t.NamespacedName
 		}
-		table.Append([]string{t.Name, t.Description, nsName})
+		table.Append([]string{t.Name, firstLineTableText(t.Description, 100), nsName})
 	}
 	table.Render()
 }
@@ -959,7 +1123,11 @@ func showAgents(ctx context.Context, client *copilot.Client, format string) {
 		table := render.CreateTable(header, nil, false, false, tableMode)
 
 		for _, a := range res.Agents {
-			table.Append([]string{a.Name, a.DisplayName, a.Description})
+			table.Append([]string{a.Name, a.DisplayName, inlineScalarText(a.Description)})
+		}
+		if len(res.Agents) == 0 {
+			fmt.Println("No custom agents found.")
+			return nil
 		}
 		table.Render()
 		return nil
@@ -991,26 +1159,28 @@ func showSkills(ctx context.Context, client *copilot.Client, format string) {
 			return nil
 		}
 
+		home, _ := os.UserHomeDir()
 		header := []string{"Name", "Enabled", "Source", "Invocable", "Path", "Description"}
 		table := render.CreateTable(header, nil, false, false, tableMode)
 
 		for _, s := range res.Skills {
 			path := ""
 			if s.Path != nil {
-				path = *s.Path
+				path = shortenHomePath(*s.Path, home)
 			}
-			desc := strings.SplitN(s.Description, "\n", 2)[0]
-			if len(desc) > 80 {
-				desc = desc[:77] + "..."
-			}
+			desc := firstLineTableText(s.Description, 80)
 			table.Append([]string{
 				s.Name,
 				fmt.Sprintf("%v", s.Enabled),
-				s.Source,
+				string(s.Source),
 				fmt.Sprintf("%v", s.UserInvocable),
 				path,
 				desc,
 			})
+		}
+		if len(res.Skills) == 0 {
+			fmt.Println("No skills found.")
+			return nil
 		}
 		table.Render()
 		return nil
@@ -1047,8 +1217,8 @@ func showExtensions(ctx context.Context, client *copilot.Client, format string) 
 
 		for _, e := range res.Extensions {
 			pid := ""
-			if e.PID != nil {
-				pid = strconv.FormatInt(*e.PID, 10)
+			if e.Pid != nil {
+				pid = strconv.FormatInt(*e.Pid, 10)
 			}
 			table.Append([]string{
 				e.ID,
@@ -1057,6 +1227,10 @@ func showExtensions(ctx context.Context, client *copilot.Client, format string) 
 				string(e.Source),
 				pid,
 			})
+		}
+		if len(res.Extensions) == 0 {
+			fmt.Println("No extensions found.")
+			return nil
 		}
 		table.Render()
 		return nil
@@ -1103,6 +1277,10 @@ func showPlugins(ctx context.Context, client *copilot.Client, format string) {
 				version,
 			})
 		}
+		if len(res.Plugins) == 0 {
+			fmt.Println("No plugins found.")
+			return nil
+		}
 		table.Render()
 		return nil
 	})
@@ -1123,7 +1301,7 @@ func newMcpCmd(client *copilot.Client) *cobra.Command {
 
 func showMcp(ctx context.Context, client *copilot.Client, format string) {
 	err := withSession(ctx, client, func(session *copilot.Session) error {
-		res, err := session.RPC.Mcp.List(ctx)
+		res, err := session.RPC.MCP.List(ctx)
 		if err != nil {
 			return err
 		}
@@ -1151,6 +1329,10 @@ func showMcp(ctx context.Context, client *copilot.Client, format string) {
 				source,
 				errMsg,
 			})
+		}
+		if len(res.Servers) == 0 {
+			fmt.Println("No MCP servers found.")
+			return nil
 		}
 		table.Render()
 		return nil
@@ -1350,7 +1532,7 @@ func newPingCmd(client *copilot.Client) *cobra.Command {
 }
 
 func showPing(ctx context.Context, client *copilot.Client, format string) {
-	res, err := client.RPC.Ping(ctx, nil)
+	res, err := client.Ping(ctx, copilotSDKClientName)
 	if err != nil {
 		log.Printf("Error pinging: %v", err)
 		return
@@ -1362,8 +1544,8 @@ func showPing(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	fmt.Printf("Message: %s\n", res.Message)
-	fmt.Printf("Protocol Version: %d\n", res.ProtocolVersion)
-	fmt.Printf("Timestamp: %d\n", res.Timestamp)
+	fmt.Printf("Protocol Version: %s\n", formatOptionalInt(res.ProtocolVersion))
+	fmt.Printf("Timestamp: %s\n", formatTimeRFC3339(res.Timestamp))
 }
 
 func newCurrentModelCmd(client *copilot.Client) *cobra.Command {
@@ -1578,10 +1760,10 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 		summary := render.CreateTable([]string{"Property", "Value"}, nil, false, false, tableMode)
 		summary.Append([]string{"Session ID", sessionID})
 		summary.Append([]string{"Current Model", formatOptionalString(metrics.CurrentModel)})
-		summary.Append([]string{"Start Time", formatUnixMillis(metrics.SessionStartTime)})
+		summary.Append([]string{"Start Time", formatTimeRFC3339(metrics.SessionStartTime)})
 		summary.Append([]string{"User Requests", strconv.FormatInt(metrics.TotalUserRequests, 10)})
 		summary.Append([]string{"Premium Cost", render.FormatFloatCompact(metrics.TotalPremiumRequestCost)})
-		summary.Append([]string{"API Duration", formatMilliseconds(metrics.TotalAPIDurationMS)})
+		summary.Append([]string{"API Duration", formatMilliseconds(float64(metrics.TotalAPIDurationMs))})
 		summary.Append([]string{"Last Call Input", strconv.FormatInt(metrics.LastCallInputTokens, 10)})
 		summary.Append([]string{"Last Call Output", strconv.FormatInt(metrics.LastCallOutputTokens, 10)})
 		summary.Append([]string{"Files Modified", strconv.FormatInt(metrics.CodeChanges.FilesModifiedCount, 10)})
@@ -1691,11 +1873,11 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 	for _, s := range sessions {
 		cwd := "-"
 		if s.Context != nil {
-			cwd = shortenHomePath(s.Context.Cwd, home)
+			cwd = shortenHomePath(s.Context.WorkingDirectory, home)
 		}
 		summary := "-"
 		if s.Summary != nil {
-			summary = normalizeInlineText(*s.Summary)
+			summary = inlineScalarText(*s.Summary)
 		}
 		status := ""
 		if lastID != nil && s.SessionID == *lastID {
@@ -1748,10 +1930,14 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 			shortenSessionTableID(s.SessionID),
 			wrapSessionTableValue(summary, wrapWidths.summary),
 			wrapSessionTableValue(cwd, wrapWidths.cwd),
-			formatRelativeTimestampShort(s.StartTime, now),
-			formatRelativeTimestampShort(s.ModifiedTime, now),
+			formatRelativeTimestamp(s.StartTime, now),
+			formatRelativeTimestamp(s.ModifiedTime, now),
 			wrapSessionTableValue(status, wrapWidths.status),
 		})
+	}
+	if len(sessions) == 0 {
+		fmt.Println("No sessions found.")
+		return
 	}
 	table.Render()
 }
@@ -1856,7 +2042,29 @@ func formatRelativeTimestampShort(raw string, now time.Time) string {
 	if err != nil {
 		return raw
 	}
+	return formatRelativeTimestamp(ts, now)
+}
+
+func formatRelativeTimestamp(ts time.Time, now time.Time) string {
+	if ts.IsZero() {
+		return "-"
+	}
 	return formatRelativeDurationShort(now.Sub(ts))
+}
+
+func formatTimeRFC3339(ts time.Time) string {
+	if ts.IsZero() {
+		return "-"
+	}
+	return ts.Local().Format(time.RFC3339)
+}
+
+func unmarshalSessionEvent(line []byte) (copilot.SessionEvent, error) {
+	var event copilot.SessionEvent
+	if err := json.Unmarshal(line, &event); err != nil {
+		return copilot.SessionEvent{}, err
+	}
+	return event, nil
 }
 
 func formatRelativeDurationShort(delta time.Duration) string {
@@ -2227,18 +2435,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		return
 	}
 
-	// Fetch models to join with usage (Left Join Multiplier)
-	multiplierMap := make(map[string]float64)
-	modelsList, err := client.ListModels(ctx)
-	if err == nil {
-		for _, m := range modelsList {
-			if m.Billing != nil {
-				multiplierMap[analyze.NormalizeModelKey(m.Name)] = m.Billing.Multiplier
-				multiplierMap[analyze.NormalizeModelKey(m.ID)] = m.Billing.Multiplier
-			}
-		}
-	}
-
 	type usageItem struct {
 		Product          string  `json:"product" yaml:"product"`
 		SKU              string  `json:"sku" yaml:"sku"`
@@ -2252,7 +2448,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
 		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
 		Period           string  `json:"-" yaml:"-"` // Not in API, used for sorting
-		Multiplier       string  `json:"multiplier,omitempty" yaml:"multiplier,omitempty"`
 	}
 
 	// Fetch included limit if available (for reference only, as it's for current month)
@@ -2274,14 +2469,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 			}
 		}
 		for _, item := range res.UsageItems {
-			multiplier := "-"
-			if m, ok := multiplierMap[analyze.NormalizeModelKey(item.Model)]; ok {
-				multiplier = strconv.FormatFloat(m, 'f', -1, 64)
-				if m == 0 {
-					multiplier = "Included (0)"
-				}
-			}
-
 			usageItems = append(usageItems, usageItem{
 				Product:          item.Product,
 				SKU:              item.SKU,
@@ -2295,7 +2482,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 				NetQuantity:      item.NetQuantity,
 				NetAmount:        item.NetAmount,
 				Period:           periodStr,
-				Multiplier:       multiplier,
 			})
 		}
 	}
@@ -2331,15 +2517,24 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		periodGroups[item.Period] = append(periodGroups[item.Period], item)
 	}
 
+	if len(usageItems) == 0 {
+		fmt.Printf("--- Billing Usage for %s (%s) ---\n", username, responses[0].User)
+		if entitlement > 0 {
+			fmt.Printf("Monthly Included Premium Requests (current plan): %s\n", strconv.FormatFloat(entitlement, 'f', -1, 64))
+		}
+		fmt.Println("No billable usage items found for the selected period.")
+		return
+	}
+
 	fmt.Printf("--- Billing Usage for %s (%s) ---\n", username, responses[0].User)
 	if entitlement > 0 {
 		fmt.Printf("Monthly Included Premium Requests (current plan): %s\n", strconv.FormatFloat(entitlement, 'f', -1, 64))
 	}
-	header := []string{"Period", "SKU", "Model", "Multiplier", "Used (req.)", "Billed (req.)", "Amount (USD)"}
+	header := []string{"Period", "SKU", "Model", "Used (req.)", "Billed (req.)", "Amount (USD)"}
 	if last == 0 {
 		header = header[1:] // Remove Period column if only one response
 	}
-	table := render.CreateTable(header, []int{len(header) - 4, len(header) - 3, len(header) - 2, len(header) - 1}, last > 0, last > 0, tableMode)
+	table := render.CreateTable(header, []int{len(header) - 3, len(header) - 2, len(header) - 1}, last > 0, last > 0, tableMode)
 
 	for _, p := range periods {
 		items := periodGroups[p]
@@ -2363,11 +2558,10 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		var periodUsedTotal, periodBilledTotal, periodAmountTotal float64
 		for i, sku := range skus {
 			skuItems := skuGroups[sku]
-			var models, multipliers, useds, billeds, amounts []string
+			var models, useds, billeds, amounts []string
 			var skuUsedTotal, skuBilledTotal, skuAmountTotal float64
 			for _, item := range skuItems {
 				models = append(models, item.Model)
-				multipliers = append(multipliers, item.Multiplier)
 				useds = append(useds, strconv.FormatFloat(item.GrossQuantity, 'f', -1, 64))
 				billeds = append(billeds, strconv.FormatFloat(item.NetQuantity, 'f', -1, 64))
 				amounts = append(amounts, fmt.Sprintf("$%.2f", item.NetAmount))
@@ -2383,7 +2577,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 				p,
 				sku,
 				strings.Join(models, "\n"),
-				strings.Join(multipliers, "\n"),
 				strings.Join(useds, "\n"),
 				strings.Join(billeds, "\n"),
 				strings.Join(amounts, "\n"),
@@ -2400,7 +2593,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 					p,
 					"Subtotal (All SKUs)",
 					"", // Model
-					"", // Multiplier
 					strconv.FormatFloat(periodUsedTotal, 'f', -1, 64),
 					strconv.FormatFloat(periodBilledTotal, 'f', -1, 64),
 					fmt.Sprintf("$%.2f", periodAmountTotal),
@@ -2414,7 +2606,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 	table.Render()
 	fmt.Println("\nNotes:")
-	fmt.Println("- 'Multiplier' is the request consumption rate per interaction for the model.")
 	fmt.Println("- 'Used (req.)' is the total premium requests consumed.")
 	fmt.Println("- 'Billed (req.)' is the overage amount you are billed for.")
 	fmt.Println("- 'Amount (USD)' is the total billed cost in USD.")
@@ -2725,19 +2916,22 @@ type sessionEventValidationRowRef struct {
 	Timestamp time.Time
 }
 
-// Mirrors the generated SessionEventType constants so validator output can tell
-// whether a row uses a type known to the current copilot-sdk build.
+// Mirrors the generated SessionEventType constants (copilot-sdk v1.0.4) so
+// validator output can tell whether a row uses a type known to the current SDK.
 var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
 	copilot.SessionEventTypeAbort:                         {},
 	copilot.SessionEventTypeAssistantIntent:               {},
 	copilot.SessionEventTypeAssistantMessage:              {},
 	copilot.SessionEventTypeAssistantMessageDelta:         {},
+	copilot.SessionEventTypeAssistantMessageStart:         {},
 	copilot.SessionEventTypeAssistantReasoning:            {},
 	copilot.SessionEventTypeAssistantReasoningDelta:       {},
 	copilot.SessionEventTypeAssistantStreamingDelta:       {},
 	copilot.SessionEventTypeAssistantTurnEnd:              {},
 	copilot.SessionEventTypeAssistantTurnStart:            {},
 	copilot.SessionEventTypeAssistantUsage:                {},
+	copilot.SessionEventTypeAutoModeSwitchCompleted:       {},
+	copilot.SessionEventTypeAutoModeSwitchRequested:       {},
 	copilot.SessionEventTypeCapabilitiesChanged:           {},
 	copilot.SessionEventTypeCommandCompleted:              {},
 	copilot.SessionEventTypeCommandExecute:                {},
@@ -2750,37 +2944,55 @@ var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
 	copilot.SessionEventTypeExternalToolCompleted:         {},
 	copilot.SessionEventTypeExternalToolRequested:         {},
 	copilot.SessionEventTypeHookEnd:                       {},
+	copilot.SessionEventTypeHookProgress:                  {},
 	copilot.SessionEventTypeHookStart:                     {},
-	copilot.SessionEventTypeMcpOauthCompleted:             {},
-	copilot.SessionEventTypeMcpOauthRequired:              {},
+	copilot.SessionEventTypeMCPAppToolCallComplete:        {},
+	copilot.SessionEventTypeMCPOauthCompleted:             {},
+	copilot.SessionEventTypeMCPOauthRequired:              {},
+	copilot.SessionEventTypeModelCallFailure:              {},
 	copilot.SessionEventTypePendingMessagesModified:       {},
 	copilot.SessionEventTypePermissionCompleted:           {},
 	copilot.SessionEventTypePermissionRequested:           {},
 	copilot.SessionEventTypeSamplingCompleted:             {},
 	copilot.SessionEventTypeSamplingRequested:             {},
+	copilot.SessionEventTypeSessionAutopilotObjectiveChanged: {},
 	copilot.SessionEventTypeSessionBackgroundTasksChanged: {},
+	copilot.SessionEventTypeSessionBinaryAsset:            {},
+	copilot.SessionEventTypeSessionCanvasClosed:           {},
+	copilot.SessionEventTypeSessionCanvasOpened:           {},
+	copilot.SessionEventTypeSessionCanvasRecorded:         {},
+	copilot.SessionEventTypeSessionCanvasRegistryChanged:  {},
+	copilot.SessionEventTypeSessionCanvasRemoved:          {},
+	copilot.SessionEventTypeSessionCanvasUnavailable:      {},
 	copilot.SessionEventTypeSessionCompactionComplete:     {},
 	copilot.SessionEventTypeSessionCompactionStart:        {},
 	copilot.SessionEventTypeSessionContextChanged:         {},
 	copilot.SessionEventTypeSessionCustomAgentsUpdated:    {},
+	copilot.SessionEventTypeSessionCustomNotification:     {},
 	copilot.SessionEventTypeSessionError:                  {},
+	copilot.SessionEventTypeSessionExtensionsAttachmentsPushed: {},
 	copilot.SessionEventTypeSessionExtensionsLoaded:       {},
 	copilot.SessionEventTypeSessionHandoff:                {},
 	copilot.SessionEventTypeSessionIdle:                   {},
 	copilot.SessionEventTypeSessionInfo:                   {},
-	copilot.SessionEventTypeSessionMcpServerStatusChanged: {},
-	copilot.SessionEventTypeSessionMcpServersLoaded:       {},
+	copilot.SessionEventTypeSessionMCPServerStatusChanged: {},
+	copilot.SessionEventTypeSessionMCPServersLoaded:       {},
 	copilot.SessionEventTypeSessionModeChanged:            {},
 	copilot.SessionEventTypeSessionModelChange:            {},
+	copilot.SessionEventTypeSessionPermissionsChanged:       {},
 	copilot.SessionEventTypeSessionPlanChanged:            {},
 	copilot.SessionEventTypeSessionRemoteSteerableChanged: {},
 	copilot.SessionEventTypeSessionResume:                 {},
+	copilot.SessionEventTypeSessionScheduleCancelled:      {},
+	copilot.SessionEventTypeSessionScheduleCreated:        {},
+	copilot.SessionEventTypeSessionScheduleRearmed:        {},
 	copilot.SessionEventTypeSessionShutdown:               {},
 	copilot.SessionEventTypeSessionSkillsLoaded:           {},
 	copilot.SessionEventTypeSessionSnapshotRewind:         {},
 	copilot.SessionEventTypeSessionStart:                  {},
 	copilot.SessionEventTypeSessionTaskComplete:           {},
 	copilot.SessionEventTypeSessionTitleChanged:           {},
+	copilot.SessionEventTypeSessionTodosChanged:           {},
 	copilot.SessionEventTypeSessionToolsUpdated:           {},
 	copilot.SessionEventTypeSessionTruncation:             {},
 	copilot.SessionEventTypeSessionUsageInfo:              {},
@@ -3603,7 +3815,7 @@ func validateSessionEventsAtPath(sessionID string, eventsPath string, sampleLimi
 
 		sdkCompatible := true
 		sdkError := ""
-		if _, err := copilot.UnmarshalSessionEvent(line); err != nil {
+		if _, err := unmarshalSessionEvent(line); err != nil {
 			sdkCompatible = false
 			sdkError = err.Error()
 			summary.SDKIncompatibleRows++
@@ -3896,6 +4108,22 @@ func eventText(data map[string]any) string {
 
 func inlineScalarText(value string) string {
 	return truncateRunes(normalizeInlineText(value), 120)
+}
+
+func firstLineTableText(text string, maxRunes int) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "-"
+	}
+	text = strings.SplitN(text, "\n", 2)[0]
+	return truncateRunes(normalizeInlineText(text), maxRunes)
+}
+
+func formatStatTokenCount(value int64) string {
+	if value == 0 {
+		return "0"
+	}
+	return formatTokenCount(int(value))
 }
 
 func truncateRunes(text string, limit int) string {
@@ -5857,7 +6085,7 @@ func showValidateEvents(ctx context.Context, client *copilot.Client, sessionID s
 
 	fmt.Println("\nNotes:")
 	fmt.Println("- 'SDK known' is based on the current generated copilot.SessionEventType constants.")
-	fmt.Println("- 'SDK compatible' means copilot.UnmarshalSessionEvent accepted the original JSONL row as-is.")
+	fmt.Println("- 'SDK compatible' means json.Unmarshal into copilot.SessionEvent accepted the original JSONL row as-is.")
 	fmt.Println("- On copilot-sdk/go v0.2.2+, unknown event types can still be SDK-compatible because the SDK preserves their payloads as RawSessionEventData.")
 	fmt.Println("- 'Local compatible' means copilot-show's schema-light parser would still retain the event, including timestamp/data shapes that the typed SDK parser still rejects.")
 	fmt.Println("- A graceful resume points parentId at the previous session.shutdown and keeps data.eventCount equal to the prior row count.")
@@ -6141,7 +6369,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 	for m := range stats {
 		models = append(models, m)
 	}
-	sort.Strings(models)
+	sortStatsModels(models, stats)
 
 	for _, model := range models {
 		s := stats[model]
@@ -6201,14 +6429,14 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 				"Rows are still shown when a model lacks API pricing; those rows keep request and token counts, while API totals become lower bounds.",
 				"Shutdown `inputTokens` are treated as total input that can already include `cacheReadTokens`; the estimate prices uncached input as `max(inputTokens - cacheReadTokens, 0)` and prices cache reads separately.",
 				"OpenAI and Gemini pricing use standard short-context tiers; long-context, regional, storage, and batch adjustments are not modeled.",
-				"Anthropic cache reads and Gemini context-cache reads use published cached-input rates; cache writes and storage are not priced because duration is not persisted in session logs.",
+				"Anthropic cache writes are priced when the selected model has a verified write rate. Storage-duration charges are still not modeled because session logs do not persist cache lifetimes.",
 				"Active session tails without session.shutdown contribute request counts but not token-based costs.",
 			}
 			if hasActiveAPIPricingOverrides {
 				payload["apiPricingOverridePath"] = apiPricingOverrides.Path
 				payload["apiPricingOverrideModels"] = apiPricingOverrides.ModelIDs
 			}
-			payload["modelCatalogSource"] = "https://docs.github.com/en/copilot/reference/ai-models/supported-models#model-multipliers"
+			payload["modelCatalogSource"] = "https://docs.github.com/en/copilot/reference/ai-models/supported-models"
 		}
 		printYAML(payload)
 		return
@@ -6282,18 +6510,18 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 					apiCost,
 				)
 			} else {
-				row = append(row, strconv.FormatInt(s.Input, 10))
+				row = append(row, formatStatTokenCount(s.Input))
 				if hasCacheReadTokens {
-					row = append(row, strconv.FormatInt(s.CacheRead, 10))
+					row = append(row, formatStatTokenCount(s.CacheRead))
 				}
 				if hasCacheWriteTokens {
-					row = append(row, strconv.FormatInt(s.CacheWrite, 10))
+					row = append(row, formatStatTokenCount(s.CacheWrite))
 				}
-				row = append(row, strconv.FormatInt(s.Output, 10), overageEst)
+				row = append(row, formatStatTokenCount(s.Output), overageEst)
 				row = append(row, apiCost)
 			}
 		} else {
-			row = append(row, strconv.FormatInt(s.Input, 10), strconv.FormatInt(s.Output, 10), overageEst)
+			row = append(row, formatStatTokenCount(s.Input), formatStatTokenCount(s.Output), overageEst)
 		}
 		table.Append(row)
 	}
@@ -6312,13 +6540,13 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 	}
 	fmt.Println("Notes:")
 	fmt.Println("- Overage cost uses $0.04 USD per premium request.")
-	fmt.Println("- `PR` means premium requests and can be fractional because model multipliers are preserved from session shutdown metrics.")
+	fmt.Println("- `PR` means premium requests and can be fractional because session shutdown metrics preserve billed request weights.")
 	fmt.Println("- `PR Cost` is the hypothetical $0.04-per-PR overage charge; if your usage stays within the premium requests included in your plan, the actual overage billed can still be $0.")
 	if showAPICosts {
 		if !hasActiveAPIPricingOverrides {
-			fmt.Println("- API cost uses built-in public token prices from OpenAI, Anthropic, and Google docs.")
+			fmt.Println("- API cost uses the built-in public token-price catalog derived from provider references.")
 		} else {
-			fmt.Printf("- API cost uses built-in public token prices with local YAML overrides from %s.\n", apiPricingOverrides.Path)
+			fmt.Printf("- API cost uses the built-in public token-price catalog with local YAML overrides from %s.\n", apiPricingOverrides.Path)
 		}
 		fmt.Println("- Model availability is plan-dependent; local shutdown metrics can still contain model IDs that are not currently visible in `copilot-show models`.")
 		fmt.Println("- Models without API pricing still appear in the table; their `API Cost` stays `-`, and the total becomes a lower bound.")
@@ -6342,7 +6570,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 		fmt.Println("- OpenAI and Gemini estimates use standard short-context tiers. Long-context, regional, fast-mode, batch, and tool-call surcharges are not modeled.")
 		fmt.Println("- Active session tails without `session.shutdown` can contribute request counts, but not token-based API cost estimates.")
 		if len(modelsWithoutAPIPricing) > 0 {
-			fmt.Printf("- Models without hardcoded API pricing: %s\n", strings.Join(modelsWithoutAPIPricing, ", "))
+			fmt.Printf("- Models without built-in API pricing: %s\n", strings.Join(modelsWithoutAPIPricing, ", "))
 		}
 		if len(modelsWithoutTokenUsage) > 0 {
 			fmt.Printf("- Models with request counts but no shutdown token usage yet: %s\n", strings.Join(modelsWithoutTokenUsage, ", "))

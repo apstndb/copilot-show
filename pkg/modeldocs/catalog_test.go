@@ -7,7 +7,12 @@ import (
 	"testing"
 
 	copilot "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
 )
+
+func float64Ptr(v float64) *float64 {
+	return &v
+}
 
 func TestNormalizeModelNameKey(t *testing.T) {
 	tests := []struct {
@@ -17,6 +22,7 @@ func TestNormalizeModelNameKey(t *testing.T) {
 		{"Gemini 3 Pro (Preview)", "gemini-3-pro-preview"},
 		{"Claude Sonnet 4.0", "claude-sonnet-4"},
 		{"GPT-5.1 Codex Max", "gpt-5.1-codex-max"},
+		{"GPT-4.1[^1]", "gpt-4.1"},
 	}
 
 	for _, tt := range tests {
@@ -29,23 +35,17 @@ func TestNormalizeModelNameKey(t *testing.T) {
 func TestBuildSnapshotMatchesPreviewNames(t *testing.T) {
 	snapshot, err := BuildSnapshotWithOptions(context.Background(), []copilot.ModelInfo{
 		{
-			ID:   "gemini-3-pro-preview",
-			Name: "Gemini 3 Pro (Preview)",
+			ID:   "gemini-3.1-pro-preview",
+			Name: "Gemini 3.1 Pro (Preview)",
 			Policy: &copilot.ModelPolicy{
 				State: "enabled",
 			},
 			Billing: &copilot.ModelBilling{
-				Multiplier: 1,
-			},
-		},
-		{
-			ID:   "claude-sonnet-4",
-			Name: "Claude Sonnet 4",
-			Policy: &copilot.ModelPolicy{
-				State: "enabled",
-			},
-			Billing: &copilot.ModelBilling{
-				Multiplier: 1,
+				Multiplier: float64Ptr(1),
+				TokenPrices: &rpc.ModelBillingTokenPrices{
+					InputPrice:  float64Ptr(250),
+					OutputPrice: float64Ptr(1500),
+				},
 			},
 		},
 	}, SnapshotOptions{})
@@ -53,43 +53,19 @@ func TestBuildSnapshotMatchesPreviewNames(t *testing.T) {
 		t.Fatalf("BuildSnapshotWithOptions() error = %v", err)
 	}
 
-	var geminiPro JoinedModel
 	var gemini31 JoinedModel
-	var gpt41 JoinedModel
-	foundGeminiPro := false
+	var gpt5Mini JoinedModel
 	foundGemini31 := false
-	foundGPT41 := false
+	foundGPT5Mini := false
 	for _, model := range snapshot.Models {
 		switch model.Name {
-		case "Gemini 3 Pro":
-			geminiPro = model
-			foundGeminiPro = true
 		case "Gemini 3.1 Pro":
 			gemini31 = model
 			foundGemini31 = true
-		case "GPT-4.1":
-			gpt41 = model
-			foundGPT41 = true
+		case "GPT-5 mini":
+			gpt5Mini = model
+			foundGPT5Mini = true
 		}
-	}
-
-	if !foundGeminiPro {
-		t.Fatalf("Gemini 3 Pro docs row not found")
-	}
-	if !geminiPro.VisibleNow {
-		t.Fatalf("Gemini 3 Pro should be matched as visible")
-	}
-	if geminiPro.Provider != "Google" {
-		t.Fatalf("Gemini 3 Pro provider = %q, want %q", geminiPro.Provider, "Google")
-	}
-	if !geminiPro.Modes.Agent || !geminiPro.Modes.Ask || !geminiPro.Modes.Edit {
-		t.Fatalf("Gemini 3 Pro modes = %#v, want all true", geminiPro.Modes)
-	}
-	if len(geminiPro.LiveModels) != 1 || geminiPro.LiveModels[0].ID != "gemini-3-pro-preview" {
-		t.Fatalf("Gemini 3 Pro live matches = %#v, want gemini-3-pro-preview", geminiPro.LiveModels)
-	}
-	if geminiPro.Multipliers == nil || geminiPro.Multipliers.Paid == nil || *geminiPro.Multipliers.Paid != 1 {
-		t.Fatalf("Gemini 3 Pro multipliers = %#v, want paid=1", geminiPro.Multipliers)
 	}
 
 	if !foundGemini31 {
@@ -98,17 +74,20 @@ func TestBuildSnapshotMatchesPreviewNames(t *testing.T) {
 	if gemini31.Provider != "Google" {
 		t.Fatalf("Gemini 3.1 Pro provider = %q, want %q", gemini31.Provider, "Google")
 	}
-	if gemini31.VisibleNow {
-		t.Fatalf("Gemini 3.1 Pro should remain not visible in this fixture")
+	if !gemini31.VisibleNow {
+		t.Fatalf("Gemini 3.1 Pro should be matched as visible")
 	}
-	if gemini31.Multipliers == nil || gemini31.Multipliers.Paid == nil || *gemini31.Multipliers.Paid != 1 {
-		t.Fatalf("Gemini 3.1 Pro multipliers = %#v, want paid=1", gemini31.Multipliers)
+	if len(gemini31.LiveModels) != 1 || gemini31.LiveModels[0].ID != "gemini-3.1-pro-preview" {
+		t.Fatalf("Gemini 3.1 Pro live matches = %#v, want gemini-3.1-pro-preview", gemini31.LiveModels)
 	}
-	if !foundGPT41 {
-		t.Fatalf("GPT-4.1 docs row not found")
+	if gemini31.LiveModels[0].TokenPricing == nil || gemini31.LiveModels[0].TokenPricing.InputUSDPerMTok == nil || *gemini31.LiveModels[0].TokenPricing.InputUSDPerMTok != 2.5 {
+		t.Fatalf("Gemini 3.1 Pro token pricing = %#v, want input=2.5", gemini31.LiveModels[0].TokenPricing)
 	}
-	if gpt41.Multipliers == nil || gpt41.Multipliers.Paid == nil || *gpt41.Multipliers.Paid != 0 || gpt41.Multipliers.Free == nil || *gpt41.Multipliers.Free != 1 {
-		t.Fatalf("GPT-4.1 multipliers = %#v, want paid=0 and free=1", gpt41.Multipliers)
+	if !foundGPT5Mini {
+		t.Fatalf("GPT-5 mini docs row not found")
+	}
+	if !gpt5Mini.Plans.Pro || !gpt5Mini.Plans.Max {
+		t.Fatalf("GPT-5 mini plans = %#v, want Pro and Max", gpt5Mini.Plans)
 	}
 
 	if snapshot.LoadedFrom != string(loadModeEmbedded) {
@@ -130,9 +109,7 @@ func TestBuildSnapshotWithLatestFallback(t *testing.T) {
 		case strings.HasSuffix(url, "/model-supported-clients.yml"):
 			return []byte("[]\n"), nil
 		case strings.HasSuffix(url, "/model-supported-plans.yml"):
-			return []byte("- name: Gemini 3 Pro\n  free: false\n  student: true\n  pro: true\n  pro_plus: true\n  business: true\n  enterprise: true\n"), nil
-		case strings.HasSuffix(url, "/model-multipliers.yml"):
-			return []byte("- name: Gemini 3 Pro\n  multiplier_paid: 1\n  multiplier_free: Not applicable\n"), nil
+			return []byte("- name: Gemini 3 Pro\n  pro: true\n  pro_plus: true\n  max: true\n  business: true\n  enterprise: true\n"), nil
 		case strings.HasSuffix(url, "/model-comparison.yml"):
 			return []byte("[]\n"), nil
 		case strings.HasSuffix(url, "/model-deprecation-history.yml"):

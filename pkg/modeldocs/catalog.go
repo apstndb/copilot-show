@@ -2,6 +2,7 @@ package modeldocs
 
 import (
 	"context"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -16,16 +17,15 @@ type SnapshotOptions struct {
 }
 
 type Sources struct {
-	ReleaseStatus       string `json:"releaseStatus" yaml:"releaseStatus"`
-	SupportedClients    string `json:"supportedClients" yaml:"supportedClients"`
-	SupportedPlans      string `json:"supportedPlans" yaml:"supportedPlans"`
-	ModelMultipliers    string `json:"modelMultipliers" yaml:"modelMultipliers"`
-	ModelComparison     string `json:"modelComparison" yaml:"modelComparison"`
-	DeprecationHistory  string `json:"deprecationHistory" yaml:"deprecationHistory"`
-	EmbeddedRepo        string `json:"embeddedRepo,omitempty" yaml:"embeddedRepo,omitempty"`
-	EmbeddedRef         string `json:"embeddedRef,omitempty" yaml:"embeddedRef,omitempty"`
-	EmbeddedCommit      string `json:"embeddedCommit,omitempty" yaml:"embeddedCommit,omitempty"`
-	EmbeddedSnapshotDir string `json:"embeddedSnapshotDir,omitempty" yaml:"embeddedSnapshotDir,omitempty"`
+	ReleaseStatus                    string `json:"releaseStatus" yaml:"releaseStatus"`
+	SupportedClients                 string `json:"supportedClients" yaml:"supportedClients"`
+	SupportedPlans                   string `json:"supportedPlans" yaml:"supportedPlans"`
+	ModelComparison                  string `json:"modelComparison" yaml:"modelComparison"`
+	DeprecationHistory               string `json:"deprecationHistory" yaml:"deprecationHistory"`
+	EmbeddedRepo                     string `json:"embeddedRepo,omitempty" yaml:"embeddedRepo,omitempty"`
+	EmbeddedRef                      string `json:"embeddedRef,omitempty" yaml:"embeddedRef,omitempty"`
+	EmbeddedCommit                   string `json:"embeddedCommit,omitempty" yaml:"embeddedCommit,omitempty"`
+	EmbeddedSnapshotDir              string `json:"embeddedSnapshotDir,omitempty" yaml:"embeddedSnapshotDir,omitempty"`
 }
 
 type ClientAvailability struct {
@@ -65,27 +65,23 @@ func (c ClientAvailability) SupportedClientNames() []string {
 }
 
 type PlanAvailability struct {
-	Free       bool `json:"free" yaml:"free"`
-	Student    bool `json:"student" yaml:"student"`
 	Pro        bool `json:"pro" yaml:"pro"`
 	ProPlus    bool `json:"proPlus" yaml:"proPlus"`
+	Max        bool `json:"max" yaml:"max"`
 	Business   bool `json:"business" yaml:"business"`
 	Enterprise bool `json:"enterprise" yaml:"enterprise"`
 }
 
 func (p PlanAvailability) SupportedPlanNames() []string {
 	var names []string
-	if p.Free {
-		names = append(names, "Free")
-	}
-	if p.Student {
-		names = append(names, "Student")
-	}
 	if p.Pro {
 		names = append(names, "Pro")
 	}
 	if p.ProPlus {
 		names = append(names, "Pro+")
+	}
+	if p.Max {
+		names = append(names, "Max")
 	}
 	if p.Business {
 		names = append(names, "Business")
@@ -94,11 +90,6 @@ func (p PlanAvailability) SupportedPlanNames() []string {
 		names = append(names, "Enterprise")
 	}
 	return names
-}
-
-type RequestMultipliers struct {
-	Paid *float64 `json:"paid,omitempty" yaml:"paid,omitempty"`
-	Free *float64 `json:"free,omitempty" yaml:"free,omitempty"`
 }
 
 type ModeAvailability struct {
@@ -120,34 +111,32 @@ type RetiredModel struct {
 }
 
 type DocsModel struct {
-	Name          string              `json:"name" yaml:"name"`
-	Provider      string              `json:"provider" yaml:"provider"`
-	ReleaseStatus string              `json:"releaseStatus" yaml:"releaseStatus"`
-	Modes         ModeAvailability    `json:"modes" yaml:"modes"`
-	Clients       ClientAvailability  `json:"clients" yaml:"clients"`
-	Plans         PlanAvailability    `json:"plans" yaml:"plans"`
-	Multipliers   *RequestMultipliers `json:"multipliers,omitempty" yaml:"multipliers,omitempty"`
-	Comparison    *Comparison         `json:"comparison,omitempty" yaml:"comparison,omitempty"`
+	Name              string                    `json:"name" yaml:"name"`
+	Provider          string                    `json:"provider" yaml:"provider"`
+	ReleaseStatus     string                    `json:"releaseStatus" yaml:"releaseStatus"`
+	Modes             ModeAvailability          `json:"modes" yaml:"modes"`
+	Clients       ClientAvailability `json:"clients" yaml:"clients"`
+	Plans         PlanAvailability   `json:"plans" yaml:"plans"`
+	Comparison    *Comparison        `json:"comparison,omitempty" yaml:"comparison,omitempty"`
 }
 
 type LiveMatch struct {
-	ID                string   `json:"id" yaml:"id"`
-	Name              string   `json:"name" yaml:"name"`
-	PolicyState       string   `json:"policyState,omitempty" yaml:"policyState,omitempty"`
-	BillingMultiplier *float64 `json:"billingMultiplier,omitempty" yaml:"billingMultiplier,omitempty"`
+	ID           string           `json:"id" yaml:"id"`
+	Name         string           `json:"name" yaml:"name"`
+	PolicyState  string           `json:"policyState,omitempty" yaml:"policyState,omitempty"`
+	TokenPricing *SDKTokenPricing `json:"tokenPricing,omitempty" yaml:"tokenPricing,omitempty"`
 }
 
 type JoinedModel struct {
-	Name          string              `json:"name" yaml:"name"`
-	Provider      string              `json:"provider" yaml:"provider"`
-	ReleaseStatus string              `json:"releaseStatus" yaml:"releaseStatus"`
-	Modes         ModeAvailability    `json:"modes" yaml:"modes"`
-	Clients       ClientAvailability  `json:"clients" yaml:"clients"`
-	Plans         PlanAvailability    `json:"plans" yaml:"plans"`
-	Multipliers   *RequestMultipliers `json:"multipliers,omitempty" yaml:"multipliers,omitempty"`
-	Comparison    *Comparison         `json:"comparison,omitempty" yaml:"comparison,omitempty"`
-	VisibleNow    bool                `json:"visibleNow" yaml:"visibleNow"`
-	LiveModels    []LiveMatch         `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
+	Name          string             `json:"name" yaml:"name"`
+	Provider      string             `json:"provider" yaml:"provider"`
+	ReleaseStatus string             `json:"releaseStatus" yaml:"releaseStatus"`
+	Modes         ModeAvailability   `json:"modes" yaml:"modes"`
+	Clients       ClientAvailability `json:"clients" yaml:"clients"`
+	Plans         PlanAvailability   `json:"plans" yaml:"plans"`
+	Comparison    *Comparison        `json:"comparison,omitempty" yaml:"comparison,omitempty"`
+	VisibleNow        bool                      `json:"visibleNow" yaml:"visibleNow"`
+	LiveModels        []LiveMatch               `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
 }
 
 type Snapshot struct {
@@ -199,14 +188,7 @@ func buildSnapshotWithFetcher(ctx context.Context, live []copilot.ModelInfo, opt
 func buildSnapshotFromCatalog(live []copilot.ModelInfo, catalog docsCatalog) Snapshot {
 	liveByKey := make(map[string][]LiveMatch)
 	for _, model := range live {
-		match := LiveMatch{ID: model.ID, Name: model.Name}
-		if model.Policy != nil {
-			match.PolicyState = model.Policy.State
-		}
-		if model.Billing != nil {
-			multiplier := model.Billing.Multiplier
-			match.BillingMultiplier = &multiplier
-		}
+		match := liveMatchFromModel(model)
 		for _, key := range liveModelKeys(model) {
 			liveByKey[key] = appendUniqueLiveMatch(liveByKey[key], match)
 		}
@@ -219,16 +201,15 @@ func buildSnapshotFromCatalog(live []copilot.ModelInfo, catalog docsCatalog) Sna
 		docKeys[key] = struct{}{}
 		liveMatches := cloneLiveMatches(liveByKey[key])
 		joined = append(joined, JoinedModel{
-			Name:          model.Name,
-			Provider:      model.Provider,
-			ReleaseStatus: model.ReleaseStatus,
-			Modes:         model.Modes,
-			Clients:       model.Clients,
-			Plans:         model.Plans,
-			Multipliers:   cloneRequestMultipliers(model.Multipliers),
-			Comparison:    model.Comparison,
-			VisibleNow:    len(liveMatches) > 0,
-			LiveModels:    liveMatches,
+			Name:              model.Name,
+			Provider:          model.Provider,
+			ReleaseStatus:     model.ReleaseStatus,
+			Modes:             model.Modes,
+			Clients:           model.Clients,
+			Plans:             model.Plans,
+			Comparison:        model.Comparison,
+			VisibleNow:        len(liveMatches) > 0,
+			LiveModels:        liveMatches,
 		})
 	}
 
@@ -245,14 +226,7 @@ func buildSnapshotFromCatalog(live []copilot.ModelInfo, catalog docsCatalog) Sna
 			continue
 		}
 
-		match := LiveMatch{ID: model.ID, Name: model.Name}
-		if model.Policy != nil {
-			match.PolicyState = model.Policy.State
-		}
-		if model.Billing != nil {
-			multiplier := model.Billing.Multiplier
-			match.BillingMultiplier = &multiplier
-		}
+		match := liveMatchFromModel(model)
 		liveWithoutDocs = appendUniqueLiveMatch(liveWithoutDocs, match)
 	}
 
@@ -277,6 +251,7 @@ func buildSnapshotFromCatalog(live []copilot.ModelInfo, catalog docsCatalog) Sna
 
 func NormalizeModelNameKey(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
+	s = markdownFootnoteRef.ReplaceAllString(s, "")
 	s = strings.ReplaceAll(s, ".0", "")
 	s = strings.ReplaceAll(s, "preview", "")
 	var b strings.Builder
@@ -299,6 +274,18 @@ func liveModelKeys(model copilot.ModelInfo) []string {
 		keys = append(keys, idKey)
 	}
 	return keys
+}
+
+func liveMatchFromModel(model copilot.ModelInfo) LiveMatch {
+	match := LiveMatch{
+		ID:           model.ID,
+		Name:         model.Name,
+		TokenPricing: cloneSDKTokenPricing(SDKTokenPricingFromModel(model)),
+	}
+	if model.Policy != nil {
+		match.PolicyState = model.Policy.State
+	}
+	return match
 }
 
 func appendUniqueLiveMatch(matches []LiveMatch, match LiveMatch) []LiveMatch {
@@ -340,18 +327,4 @@ func cloneStrings(values []string) []string {
 	return cloned
 }
 
-func cloneRequestMultipliers(multipliers *RequestMultipliers) *RequestMultipliers {
-	if multipliers == nil {
-		return nil
-	}
-	cloned := &RequestMultipliers{}
-	if multipliers.Paid != nil {
-		paid := *multipliers.Paid
-		cloned.Paid = &paid
-	}
-	if multipliers.Free != nil {
-		free := *multipliers.Free
-		cloned.Free = &free
-	}
-	return cloned
-}
+var markdownFootnoteRef = regexp.MustCompile(`\[\^[^\]]+\]`)

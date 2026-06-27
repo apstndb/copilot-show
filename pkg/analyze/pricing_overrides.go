@@ -11,6 +11,7 @@ import (
 )
 
 var BuiltInAPIPricingSources = []string{
+	"https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/models-and-pricing.yml",
 	"https://developers.openai.com/api/docs/pricing",
 	"https://platform.claude.com/docs/en/about-claude/pricing",
 	"https://ai.google.dev/gemini-api/docs/pricing?hl=en",

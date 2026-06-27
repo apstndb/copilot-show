@@ -12,6 +12,7 @@ import (
 
 	"github.com/apstndb/copilot-show/pkg/analyze"
 	"github.com/apstndb/copilot-show/pkg/modeldocs"
+	"github.com/apstndb/copilot-show/pkg/render"
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/github/copilot-sdk/go/rpc"
 	"github.com/spf13/cobra"
@@ -86,58 +87,6 @@ func TestResolveVersion(t *testing.T) {
 			got := resolveVersion(tc.explicit, tc.info, tc.ok)
 			if got != tc.want {
 				t.Fatalf("resolveVersion(%q, %+v, %v) = %q, want %q", tc.explicit, tc.info, tc.ok, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFormatModelDocsLiveMultipliers(t *testing.T) {
-	t.Parallel()
-
-	zero := 0.0
-	one := 1.0
-
-	tests := []struct {
-		name    string
-		matches []modeldocs.LiveMatch
-		want    string
-	}{
-		{
-			name: "no matches",
-			want: "-",
-		},
-		{
-			name: "no live billing multiplier",
-			matches: []modeldocs.LiveMatch{
-				{ID: "gpt-5.4", Name: "GPT-5.4"},
-			},
-			want: "-",
-		},
-		{
-			name: "included multiplier",
-			matches: []modeldocs.LiveMatch{
-				{ID: "gpt-4.1", Name: "GPT-4.1", BillingMultiplier: &zero},
-			},
-			want: "Included (0)",
-		},
-		{
-			name: "deduplicated multipliers",
-			matches: []modeldocs.LiveMatch{
-				{ID: "gpt-5.4", Name: "GPT-5.4", BillingMultiplier: &one},
-				{ID: "gpt-5.4-alt", Name: "GPT-5.4 Alt", BillingMultiplier: &one},
-			},
-			want: "1",
-		},
-	}
-
-	for _, tc := range tests {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := formatModelDocsLiveMultipliers(tc.matches)
-			if got != tc.want {
-				t.Fatalf("formatModelDocsLiveMultipliers(%#v) = %q, want %q", tc.matches, got, tc.want)
 			}
 		})
 	}
@@ -314,8 +263,8 @@ func TestWrapSessionTableValue(t *testing.T) {
 func TestBuildCLIFocusedModelDocsSnapshot(t *testing.T) {
 	t.Parallel()
 
-	multiplier := 1.0
-	zero := 0.0
+	inputPrice := 2.5
+	outputPrice := 15.0
 	snapshot := modeldocs.Snapshot{
 		CatalogVersion: "catalog",
 		SourceNote:     "note",
@@ -341,16 +290,15 @@ func TestBuildCLIFocusedModelDocsSnapshot(t *testing.T) {
 				Plans: modeldocs.PlanAvailability{
 					Pro: true,
 				},
-				Multipliers: &modeldocs.RequestMultipliers{
-					Paid: &multiplier,
-					Free: &zero,
-				},
 				VisibleNow: true,
 				LiveModels: []modeldocs.LiveMatch{
 					{
-						ID:                "gpt-5.4",
-						Name:              "GPT-5.4",
-						BillingMultiplier: &multiplier,
+						ID:   "gpt-5.4",
+						Name: "GPT-5.4",
+						TokenPricing: &modeldocs.SDKTokenPricing{
+							InputUSDPerMTok:  &inputPrice,
+							OutputUSDPerMTok: &outputPrice,
+						},
 					},
 				},
 			},
@@ -397,8 +345,8 @@ func TestBuildCLIFocusedModelDocsSnapshot(t *testing.T) {
 	if got.Models[0].Provider != "OpenAI" || got.Models[0].ReleaseStatus != "GA" || !got.Models[0].VisibleNow {
 		t.Fatalf("buildCLIFocusedModelDocsSnapshot() model = %#v", got.Models[0])
 	}
-	if got.Models[0].Multipliers == nil || got.Models[0].Multipliers.Paid == nil || *got.Models[0].Multipliers.Paid != 1 || got.Models[0].Multipliers.Free == nil || *got.Models[0].Multipliers.Free != 0 {
-		t.Fatalf("buildCLIFocusedModelDocsSnapshot() multipliers = %#v", got.Models[0].Multipliers)
+	if got.Models[0].TokenPricing == nil || got.Models[0].TokenPricing.InputUSDPerMTok == nil || *got.Models[0].TokenPricing.InputUSDPerMTok != inputPrice {
+		t.Fatalf("buildCLIFocusedModelDocsSnapshot() token pricing = %#v", got.Models[0].TokenPricing)
 	}
 	if len(got.Models[0].LiveModels) != 1 || got.Models[0].LiveModels[0].ID != "gpt-5.4" {
 		t.Fatalf("buildCLIFocusedModelDocsSnapshot() liveModels = %#v", got.Models[0].LiveModels)
@@ -411,13 +359,72 @@ func TestBuildCLIFocusedModelDocsSnapshot(t *testing.T) {
 	}
 }
 
-func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
+func TestFormatReasoningEffortsForTableMarksDefault(t *testing.T) {
 	t.Parallel()
 
-	docsPaid := 0.33
-	docsFree := 1.0
+	if got := formatReasoningEffortsForTable([]string{"low", "medium", "high"}, "medium"); got != "low, medium*, high" {
+		t.Fatalf("formatReasoningEffortsForTable() = %q, want default marked with asterisk", got)
+	}
+}
+
+func TestFormatTokenCount(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		value int
+		want  string
+	}{
+		{value: 0, want: "-"},
+		{value: 8192, want: "8192"},
+		{value: 128000, want: "128k"},
+		{value: 936000, want: "936k"},
+		{value: 1000000, want: "1M"},
+		{value: 2000000, want: "2M"},
+	}
+	for _, tt := range tests {
+		if got := formatTokenCount(tt.value); got != tt.want {
+			t.Fatalf("formatTokenCount(%d) = %q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
+
+func TestModelsTableLayoutDefaultShowsAPIPricingOnly(t *testing.T) {
+	t.Parallel()
+
+	uiVersion = uiVersionNew
+	t.Cleanup(func() { uiVersion = uiVersionNew })
+
+	header, rightAligned := modelsTableLayout()
+	if len(header) != 9 || header[2] != modelsAPIPricingColumnHeader {
+		t.Fatalf("modelsTableLayout() header = %#v, want %q in third column", header, modelsAPIPricingColumnHeader)
+	}
+	if len(rightAligned) != 2 || rightAligned[0] != 3 || rightAligned[1] != 4 {
+		t.Fatalf("modelsTableLayout() rightAligned = %#v, want [3 4]", rightAligned)
+	}
+
+	row := modelsTableRow(runtimeModelView{
+		ID:   "gpt-5.4",
+		Name: "GPT-5.4",
+		TokenPricing: &modeldocs.SDKTokenPricing{
+			InputUSDPerMTok:  float64Ptr(2.5),
+			OutputUSDPerMTok: float64Ptr(15),
+		},
+		MaxContextWindowTokens: 272000,
+	})
+	if len(row) != len(header) || row[2] != "2.5/15" {
+		t.Fatalf("modelsTableRow() = %#v, want %q pricing in third column", row, modelsAPIPricingColumnHeader)
+	}
+}
+
+func float64Ptr(v float64) *float64 {
+	return &v
+}
+
+func TestBuildRuntimeModelsSnapshotUsesSDKTokenPricing(t *testing.T) {
+	t.Parallel()
+
+	priceInput := 1.0
 	liveDocsMultiplier := 9.0
-	liveOnlyMultiplier := 2.0
 	vision := true
 	reasoning := true
 
@@ -426,11 +433,15 @@ func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
 			ID:   "claude-haiku-4.5",
 			Name: "Claude Haiku 4.5",
 			Billing: &copilot.ModelBilling{
-				Multiplier: liveDocsMultiplier,
+				Multiplier: &liveDocsMultiplier,
+				TokenPrices: &rpc.ModelBillingTokenPrices{
+					InputPrice:  float64Ptr(100),
+					OutputPrice: float64Ptr(500),
+				},
 			},
 			Capabilities: copilot.ModelCapabilities{
 				Limits: copilot.ModelLimits{
-					MaxContextWindowTokens: 200000,
+					MaxContextWindowTokens: intPtr(200000),
 					MaxPromptTokens:        intPtr(8192),
 				},
 				Supports: copilot.ModelSupports{
@@ -442,17 +453,15 @@ func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
 			SupportedReasoningEfforts: []string{"low", "medium", "high"},
 			Policy: &copilot.ModelPolicy{
 				State: "enabled",
+				Terms: "preview",
 			},
 		},
 		{
 			ID:   "custom-runtime",
 			Name: "Custom Runtime",
-			Billing: &copilot.ModelBilling{
-				Multiplier: liveOnlyMultiplier,
-			},
 			Capabilities: copilot.ModelCapabilities{
 				Limits: copilot.ModelLimits{
-					MaxContextWindowTokens: 100000,
+					MaxContextWindowTokens: intPtr(100000),
 				},
 			},
 		},
@@ -460,46 +469,25 @@ func TestBuildRuntimeModelsSnapshotPrefersDocsPaidMultiplier(t *testing.T) {
 		CatalogVersion: "catalog",
 		LoadedFrom:     "embedded",
 		LoadWarnings:   []string{"warn"},
-		Sources: modeldocs.Sources{
-			ModelMultipliers: "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-multipliers.yml",
-		},
-		Models: []modeldocs.JoinedModel{
-			{
-				Name: "Claude Haiku 4.5",
-				Multipliers: &modeldocs.RequestMultipliers{
-					Paid: &docsPaid,
-					Free: &docsFree,
-				},
-			},
-		},
 	})
 
-	if got.ModelCatalogVersion != "catalog" || got.ModelCatalogLoadedFrom != "embedded" || got.ModelCatalogSource == "" {
+	if got.ModelCatalogVersion != "catalog" || got.ModelCatalogLoadedFrom != "embedded" {
 		t.Fatalf("buildRuntimeModelsSnapshot() metadata = %#v", got)
-	}
-	if got.MultiplierPlan != "paid" {
-		t.Fatalf("buildRuntimeModelsSnapshot() multiplierPlan = %q, want paid", got.MultiplierPlan)
 	}
 	if len(got.Models) != 2 {
 		t.Fatalf("buildRuntimeModelsSnapshot() models len = %d, want 2", len(got.Models))
 	}
-	if got.Models[0].MultiplierSource != "github/docs paid" || got.Models[0].SelectedMultiplier == nil || *got.Models[0].SelectedMultiplier != docsPaid {
-		t.Fatalf("buildRuntimeModelsSnapshot() docs-backed model = %#v", got.Models[0])
+	if got.Models[0].TokenPricing == nil || got.Models[0].TokenPricing.InputUSDPerMTok == nil || *got.Models[0].TokenPricing.InputUSDPerMTok != priceInput {
+		t.Fatalf("buildRuntimeModelsSnapshot() token pricing = %#v", got.Models[0].TokenPricing)
 	}
-	if got.Models[0].DocsMultipliers == nil || got.Models[0].DocsMultipliers.Free == nil || *got.Models[0].DocsMultipliers.Free != docsFree {
-		t.Fatalf("buildRuntimeModelsSnapshot() docs multipliers = %#v", got.Models[0].DocsMultipliers)
-	}
-	if got.Models[0].LiveMultiplier == nil || *got.Models[0].LiveMultiplier != liveDocsMultiplier {
-		t.Fatalf("buildRuntimeModelsSnapshot() live multiplier = %#v", got.Models[0].LiveMultiplier)
-	}
-	if got.Models[0].MultiplierDisplay != "0.33" || !got.Models[0].SupportsVision || !got.Models[0].SupportsReasoning || got.Models[0].DefaultReasoningEffort != "medium" {
+	if !got.Models[0].SupportsVision || !got.Models[0].SupportsReasoning || got.Models[0].DefaultReasoningEffort != "medium" {
 		t.Fatalf("buildRuntimeModelsSnapshot() first model view = %#v", got.Models[0])
 	}
-	if got.Models[1].MultiplierSource != "copilot-sdk live" || got.Models[1].SelectedMultiplier == nil || *got.Models[1].SelectedMultiplier != liveOnlyMultiplier {
-		t.Fatalf("buildRuntimeModelsSnapshot() runtime-only model = %#v", got.Models[1])
+	if got.Models[0].State != "enabled" || got.Models[0].PolicyTerms != "preview" {
+		t.Fatalf("buildRuntimeModelsSnapshot() policy = state %q terms %q", got.Models[0].State, got.Models[0].PolicyTerms)
 	}
-	if got.Models[1].DocsMultipliers != nil {
-		t.Fatalf("buildRuntimeModelsSnapshot() runtime-only docs multipliers = %#v, want nil", got.Models[1].DocsMultipliers)
+	if got.Models[1].TokenPricing != nil {
+		t.Fatalf("buildRuntimeModelsSnapshot() runtime-only token pricing = %#v, want nil", got.Models[1].TokenPricing)
 	}
 }
 
@@ -692,8 +680,57 @@ func TestIsKnownSDKSessionEventType(t *testing.T) {
 	if !isKnownSDKSessionEventType(copilot.SessionEventTypeSamplingRequested) {
 		t.Fatal("isKnownSDKSessionEventType(sampling.requested) = false, want true")
 	}
+	if !isKnownSDKSessionEventType(copilot.SessionEventTypeAssistantMessageStart) {
+		t.Fatal("isKnownSDKSessionEventType(assistant.message_start) = false, want true")
+	}
+	if !isKnownSDKSessionEventType(copilot.SessionEventTypeSessionTodosChanged) {
+		t.Fatal("isKnownSDKSessionEventType(session.todos_changed) = false, want true")
+	}
 	if isKnownSDKSessionEventType(copilot.SessionEventType("session.future_notice")) {
 		t.Fatal("isKnownSDKSessionEventType(session.future_notice) = true, want false")
+	}
+}
+
+func TestFormatVisionSupport(t *testing.T) {
+	t.Parallel()
+	render.SetTableFoldEnabled(false)
+	t.Cleanup(func() { render.SetTableFoldEnabled(true) })
+
+	tests := []struct {
+		name      string
+		supported bool
+		limits    *copilot.ModelVisionLimits
+		want      string
+	}{
+		{name: "unsupported", supported: false, want: "No"},
+		{name: "supported without limits", supported: true, want: "Yes"},
+		{
+			name:      "supported with limits",
+			supported: true,
+			limits: &copilot.ModelVisionLimits{
+				MaxPromptImages:    3,
+				MaxPromptImageSize: 5 * 1024 * 1024,
+				SupportedMediaTypes:  []string{"image/png", "image/jpeg"},
+			},
+			want: "Yes (3 images, 5.0 MiB)",
+		},
+		{
+			name:      "single image",
+			supported: true,
+			limits: &copilot.ModelVisionLimits{
+				MaxPromptImages: 1,
+			},
+			want: "Yes (1 image)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatVisionSupport(tt.supported, tt.limits); got != tt.want {
+				t.Fatalf("formatVisionSupport() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -778,18 +815,18 @@ func TestSDKUnmarshalSessionEventPreservesUnknownObjectPayload(t *testing.T) {
 	t.Parallel()
 
 	line := []byte(`{"id":"evt-unknown","type":"session.future_notice","timestamp":"2026-03-22T14:32:58Z","data":{"message":"future but object"}}`)
-	ev, err := copilot.UnmarshalSessionEvent(line)
+	ev, err := unmarshalSessionEvent(line)
 	if err != nil {
-		t.Fatalf("UnmarshalSessionEvent() error = %v", err)
+		t.Fatalf("unmarshalSessionEvent() error = %v", err)
 	}
 
-	if ev.Type != copilot.SessionEventType("session.future_notice") {
-		t.Fatalf("UnmarshalSessionEvent() type = %q, want %q", ev.Type, "session.future_notice")
+	if ev.Type() != copilot.SessionEventType("session.future_notice") {
+		t.Fatalf("unmarshalSessionEvent() type = %q, want %q", ev.Type(), "session.future_notice")
 	}
 
 	raw, ok := ev.Data.(*copilot.RawSessionEventData)
 	if !ok {
-		t.Fatalf("UnmarshalSessionEvent() data type = %T, want *copilot.RawSessionEventData", ev.Data)
+		t.Fatalf("unmarshalSessionEvent() data type = %T, want *copilot.RawSessionEventData", ev.Data)
 	}
 
 	var payload map[string]any

@@ -93,6 +93,17 @@ func TestEstimateAPICost(t *testing.T) {
 			wantCatalogModel: "gpt-4.1",
 		},
 		{
+			name:  "GPT-5.5 Current Pricing",
+			model: "gpt-5.5",
+			stat: &ModelStat{
+				Input:     1_000_000,
+				CacheRead: 1_000_000,
+				Output:    1_000_000,
+			},
+			wantUSD:          30.50,
+			wantCatalogModel: "gpt-5.5",
+		},
+		{
 			name:    "Empty Stat",
 			model:   "gpt-5.4",
 			stat:    &ModelStat{},
@@ -124,6 +135,27 @@ func TestEstimateAPICost(t *testing.T) {
 				t.Errorf("EstimateAPICost() missing required rate fields: %#v", got)
 			}
 		})
+	}
+}
+
+func TestEstimateAPICostAnthropicCacheWriteIsPriced(t *testing.T) {
+	got := EstimateAPICost("claude-haiku-4.5", &ModelStat{
+		Input:      2_000_000,
+		CacheRead:  1_000_000,
+		CacheWrite: 1_000_000,
+		Output:     1_000_000,
+	})
+	if got == nil {
+		t.Fatal("EstimateAPICost() = nil, want non-nil")
+	}
+	if !got.IsComplete {
+		t.Fatalf("EstimateAPICost().IsComplete = false, want true: %#v", got)
+	}
+	if got.CacheWriteUSDPerMTok == nil || abs(*got.CacheWriteUSDPerMTok-1.25) > 1e-9 {
+		t.Fatalf("EstimateAPICost().CacheWriteUSDPerMTok = %#v, want 1.25", got.CacheWriteUSDPerMTok)
+	}
+	if diff := abs(got.TotalUSD - 7.35); diff > 1e-9 {
+		t.Fatalf("EstimateAPICost().TotalUSD = %v, want 7.35", got.TotalUSD)
 	}
 }
 

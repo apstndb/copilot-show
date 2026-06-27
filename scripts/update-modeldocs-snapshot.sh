@@ -14,7 +14,6 @@ files=(
   model-release-status.yml
   model-supported-clients.yml
   model-supported-plans.yml
-  model-multipliers.yml
   model-comparison.yml
   model-deprecation-history.yml
 )

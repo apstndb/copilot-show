@@ -16,7 +16,10 @@ import (
 
 const HistoryEventLabelWidth = 20
 
-var tableWidthOverride int
+var (
+	tableWidthOverride int
+	tableFoldEnabled   = true
+)
 
 func CreateTable(header []string, rightAlignedCols []int, hierarchicalMerge bool, rowLine bool, mode string) *tablewriter.Table {
 	return newTable(os.Stdout, header, rightAlignedCols, hierarchicalMerge, rowLine, mode, defaultTableMaxWidth(mode))
@@ -24,6 +27,16 @@ func CreateTable(header []string, rightAlignedCols []int, hierarchicalMerge bool
 
 func SetTableWidthOverride(width int) {
 	tableWidthOverride = width
+}
+
+// SetTableFoldEnabled switches between folded tables (word wrap, no terminal squeeze
+// unless width is explicitly configured) and the legacy break-to-fit layout.
+func SetTableFoldEnabled(enabled bool) {
+	tableFoldEnabled = enabled
+}
+
+func TableFoldEnabled() bool {
+	return tableFoldEnabled
 }
 
 func TableMaxWidth(mode string) int {
@@ -60,9 +73,14 @@ func newTable(w io.Writer, header []string, rightAlignedCols []int, hierarchical
 
 	table := tablewriter.NewTable(w, opts...)
 
+	wrapMode := tw.WrapBreak
+	if tableFoldEnabled {
+		wrapMode = tw.WrapNormal
+	}
+
 	table.Configure(func(cfg *tablewriter.Config) {
-		cfg.Row.Formatting.AutoWrap = tw.WrapBreak
-		cfg.Header.Formatting.AutoWrap = tw.WrapBreak
+		cfg.Row.Formatting.AutoWrap = wrapMode
+		cfg.Header.Formatting.AutoWrap = wrapMode
 		cfg.Row.Formatting.AutoFormat = tw.Off
 		cfg.Header.Formatting.AutoFormat = tw.Off
 		cfg.Header.Alignment.Global = tw.AlignLeft
@@ -104,6 +122,9 @@ func defaultTableMaxWidth(mode string) int {
 			return 0
 		}
 		return calculateTableMaxWidth(mode, width)
+	}
+	if tableFoldEnabled {
+		return 0
 	}
 	if size, err := ts.GetSize(); err == nil {
 		return calculateTableMaxWidth(mode, size.Col())
