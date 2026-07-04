@@ -17,12 +17,18 @@ Provide a transparent view into Copilot's runtime state, including:
 - **YAML Processing**: [github.com/goccy/go-yaml](https://github.com/goccy/go-yaml)
 
 ## Implementation Details
-- The tool interacts with the local Copilot CLI server (started/managed by the SDK).
-- It uses the user's existing login session (e.g., via `gh auth`).
-- Most subcommands utilize a temporary session created via `client.CreateSession`.
+- The tool interacts with the local Copilot CLI server (started/managed by the SDK) for online commands; session-log commands (`stats`, `turns`, `history`, `graph`, `validate-events`, `resume-branches`) read `~/.copilot/session-state` offline.
+- `usage` shells out to `gh api` and requires GitHub CLI authentication; most other subcommands use the user's existing Copilot login session.
+- Most online subcommands utilize a temporary session created via `client.CreateSession`.
+- Session event semantics, billing caveats, and research notes live in [docs/research/](docs/research/README.md) — read before changing `history`, `turns`, `stats`, or graph logic.
+- DuckDB SQL workflows for inspecting local session JSONL live in [.github/skills/duckdb-jsonl-inspection/](.github/skills/duckdb-jsonl-inspection/SKILL.md).
+
+## Local verification
+- `go test ./...` and `go vet ./...` before submitting changes.
+- Install via `go install github.com/apstndb/copilot-show@latest` or `mise use -g go:github.com/apstndb/copilot-show@latest` (see README).
 
 ## Instructions for Agents
-- When modifying this project, maintain consistent table layouts using the `configureTable` helper.
+- When modifying this project, maintain consistent table layouts using `render.CreateTable` (pkg/render).
 - Ensure all output-related subcommands support both `table` and `yaml` formats via the `--format` flag.
 - Keep "useful but cluttered" or internal-only information under `Hidden: true` subcommands.
 - Follow Go best practices and ensure `go mod tidy` is run after adding dependencies.
@@ -33,3 +39,4 @@ Provide a transparent view into Copilot's runtime state, including:
 - Once the new implementation is verified, keep a single default user-facing path.
 - If the A/B mechanism will be reused, keep the toggle hidden rather than removing and re-adding it.
 - Document the changes and the verification results when retiring or hiding the temporary A/B implementation.
+- `--ui-version` (hidden) still toggles stats table layout and table fold behavior; history A/B was retired 2026-07-05 (new layout only).
