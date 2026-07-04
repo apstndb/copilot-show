@@ -3,13 +3,13 @@ module github.com/apstndb/copilot-show
 go 1.26.1
 
 require (
-	github.com/github/copilot-sdk/go v1.0.4
+	github.com/github/copilot-sdk/go v1.0.5
 	github.com/goccy/go-yaml v1.19.2
 	github.com/maruel/natural v1.3.0
 	github.com/olekukonko/tablewriter v1.1.4
-	github.com/olekukonko/ts v0.0.0-20171002115256-78ecb04241c0
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.9
+	github.com/spf13/pflag v1.0.10
+	golang.org/x/term v0.44.0
 )
 
 require (
@@ -33,5 +33,5 @@ require (
 	go.opentelemetry.io/otel v1.35.0 // indirect
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
 	go.opentelemetry.io/otel/trace v1.35.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )

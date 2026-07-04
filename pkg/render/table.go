@@ -11,7 +11,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	"github.com/olekukonko/tablewriter/renderer"
 	"github.com/olekukonko/tablewriter/tw"
-	"github.com/olekukonko/ts"
+	"golang.org/x/term"
 )
 
 const HistoryEventLabelWidth = 20
@@ -126,8 +126,8 @@ func defaultTableMaxWidth(mode string) int {
 	if tableFoldEnabled {
 		return 0
 	}
-	if size, err := ts.GetSize(); err == nil {
-		return calculateTableMaxWidth(mode, size.Col())
+	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+		return calculateTableMaxWidth(mode, width)
 	}
 	return 0
 }
