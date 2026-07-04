@@ -85,11 +85,11 @@ type deprecationHistoryRow struct {
 
 func baseCatalogSources() Sources {
 	return Sources{
-		ReleaseStatus:                    "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-release-status.yml",
-		SupportedClients:                 "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-supported-clients.yml",
+		ReleaseStatus:      "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-release-status.yml",
+		SupportedClients:   "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-supported-clients.yml",
 		SupportedPlans:     "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-supported-plans.yml",
 		ModelComparison:    "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-comparison.yml",
-		DeprecationHistory:               "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-deprecation-history.yml",
+		DeprecationHistory: "https://raw.githubusercontent.com/github/docs/main/data/tables/copilot/model-deprecation-history.yml",
 	}
 }
 

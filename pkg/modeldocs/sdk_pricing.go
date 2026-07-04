@@ -80,7 +80,8 @@ func formatUSDPerMTok(value *float64) string {
 	return strconv.FormatFloat(*value, 'f', -1, 64)
 }
 
-func cloneSDKTokenPricing(pricing *SDKTokenPricing) *SDKTokenPricing {
+// CloneSDKTokenPricing returns a deep copy of optional SDK token pricing fields.
+func CloneSDKTokenPricing(pricing *SDKTokenPricing) *SDKTokenPricing {
 	if pricing == nil {
 		return nil
 	}

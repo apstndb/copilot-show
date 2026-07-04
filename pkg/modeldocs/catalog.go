@@ -17,15 +17,15 @@ type SnapshotOptions struct {
 }
 
 type Sources struct {
-	ReleaseStatus                    string `json:"releaseStatus" yaml:"releaseStatus"`
-	SupportedClients                 string `json:"supportedClients" yaml:"supportedClients"`
-	SupportedPlans                   string `json:"supportedPlans" yaml:"supportedPlans"`
-	ModelComparison                  string `json:"modelComparison" yaml:"modelComparison"`
-	DeprecationHistory               string `json:"deprecationHistory" yaml:"deprecationHistory"`
-	EmbeddedRepo                     string `json:"embeddedRepo,omitempty" yaml:"embeddedRepo,omitempty"`
-	EmbeddedRef                      string `json:"embeddedRef,omitempty" yaml:"embeddedRef,omitempty"`
-	EmbeddedCommit                   string `json:"embeddedCommit,omitempty" yaml:"embeddedCommit,omitempty"`
-	EmbeddedSnapshotDir              string `json:"embeddedSnapshotDir,omitempty" yaml:"embeddedSnapshotDir,omitempty"`
+	ReleaseStatus       string `json:"releaseStatus" yaml:"releaseStatus"`
+	SupportedClients    string `json:"supportedClients" yaml:"supportedClients"`
+	SupportedPlans      string `json:"supportedPlans" yaml:"supportedPlans"`
+	ModelComparison     string `json:"modelComparison" yaml:"modelComparison"`
+	DeprecationHistory  string `json:"deprecationHistory" yaml:"deprecationHistory"`
+	EmbeddedRepo        string `json:"embeddedRepo,omitempty" yaml:"embeddedRepo,omitempty"`
+	EmbeddedRef         string `json:"embeddedRef,omitempty" yaml:"embeddedRef,omitempty"`
+	EmbeddedCommit      string `json:"embeddedCommit,omitempty" yaml:"embeddedCommit,omitempty"`
+	EmbeddedSnapshotDir string `json:"embeddedSnapshotDir,omitempty" yaml:"embeddedSnapshotDir,omitempty"`
 }
 
 type ClientAvailability struct {
@@ -111,10 +111,10 @@ type RetiredModel struct {
 }
 
 type DocsModel struct {
-	Name              string                    `json:"name" yaml:"name"`
-	Provider          string                    `json:"provider" yaml:"provider"`
-	ReleaseStatus     string                    `json:"releaseStatus" yaml:"releaseStatus"`
-	Modes             ModeAvailability          `json:"modes" yaml:"modes"`
+	Name          string             `json:"name" yaml:"name"`
+	Provider      string             `json:"provider" yaml:"provider"`
+	ReleaseStatus string             `json:"releaseStatus" yaml:"releaseStatus"`
+	Modes         ModeAvailability   `json:"modes" yaml:"modes"`
 	Clients       ClientAvailability `json:"clients" yaml:"clients"`
 	Plans         PlanAvailability   `json:"plans" yaml:"plans"`
 	Comparison    *Comparison        `json:"comparison,omitempty" yaml:"comparison,omitempty"`
@@ -135,8 +135,8 @@ type JoinedModel struct {
 	Clients       ClientAvailability `json:"clients" yaml:"clients"`
 	Plans         PlanAvailability   `json:"plans" yaml:"plans"`
 	Comparison    *Comparison        `json:"comparison,omitempty" yaml:"comparison,omitempty"`
-	VisibleNow        bool                      `json:"visibleNow" yaml:"visibleNow"`
-	LiveModels        []LiveMatch               `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
+	VisibleNow    bool               `json:"visibleNow" yaml:"visibleNow"`
+	LiveModels    []LiveMatch        `json:"liveModels,omitempty" yaml:"liveModels,omitempty"`
 }
 
 type Snapshot struct {
@@ -201,15 +201,15 @@ func buildSnapshotFromCatalog(live []copilot.ModelInfo, catalog docsCatalog) Sna
 		docKeys[key] = struct{}{}
 		liveMatches := cloneLiveMatches(liveByKey[key])
 		joined = append(joined, JoinedModel{
-			Name:              model.Name,
-			Provider:          model.Provider,
-			ReleaseStatus:     model.ReleaseStatus,
-			Modes:             model.Modes,
-			Clients:           model.Clients,
-			Plans:             model.Plans,
-			Comparison:        model.Comparison,
-			VisibleNow:        len(liveMatches) > 0,
-			LiveModels:        liveMatches,
+			Name:          model.Name,
+			Provider:      model.Provider,
+			ReleaseStatus: model.ReleaseStatus,
+			Modes:         model.Modes,
+			Clients:       model.Clients,
+			Plans:         model.Plans,
+			Comparison:    model.Comparison,
+			VisibleNow:    len(liveMatches) > 0,
+			LiveModels:    liveMatches,
 		})
 	}
 
@@ -280,7 +280,7 @@ func liveMatchFromModel(model copilot.ModelInfo) LiveMatch {
 	match := LiveMatch{
 		ID:           model.ID,
 		Name:         model.Name,
-		TokenPricing: cloneSDKTokenPricing(SDKTokenPricingFromModel(model)),
+		TokenPricing: CloneSDKTokenPricing(SDKTokenPricingFromModel(model)),
 	}
 	if model.Policy != nil {
 		match.PolicyState = model.Policy.State

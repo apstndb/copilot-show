@@ -43,8 +43,8 @@ func TestSDKTokenPricingFromModelUsesBillingTokenPrices(t *testing.T) {
 	pricing := SDKTokenPricingFromModel(copilot.ModelInfo{
 		Billing: &copilot.ModelBilling{
 			TokenPrices: &rpc.ModelBillingTokenPrices{
-				BatchSize:  ptrInt64(1_000_000),
-				InputPrice: ptrFloat64(250),
+				BatchSize:   ptrInt64(1_000_000),
+				InputPrice:  ptrFloat64(250),
 				OutputPrice: ptrFloat64(1500),
 			},
 		},
