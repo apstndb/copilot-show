@@ -30,7 +30,7 @@ Available subcommands:
 - `models`: Show models returned by the live Copilot SDK `ListModels` call, with runtime limits, reasoning support, policy state, and `$ I/O` token pricing.
 - `model-docs`: Show docs-backed model metadata from `github/docs`, joined with the live CLI model list. Use `--all` for broader docs-backed fields, or `--visible-only` to hide docs rows your account cannot select right now.
 - `tools`: Show available tools.
-- `usage`: Show billing usage report from GitHub API (`--billing premium-request|ai-credits|auto`), with included limits from quota snapshots and per-model `$ I/O` token pricing from the live SDK model list.
+- `usage`: Show billing usage report from GitHub API (`--billing premium-request|ai-credits|auto`), with included limits from quota snapshots. Default table shows Used credits or requests; use `--with-pricing` to join SDK model token pricing, or `-f yaml` for billed amounts.
 - `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
 - `turns`: Show turn-by-turn usage statistics for a session.
 
@@ -147,8 +147,10 @@ copilot-show skills --wrap-long-text
 
 Shows detailed billing usage from the GitHub API (requires `gh` CLI).
 By default it auto-detects billing mode (premium-request vs ai-credits) from quota snapshots and API data; use `--billing premium-request` or `--billing ai-credits` to force a mode.
-The default table focuses on **Used** credits or premium requests grouped by Period and SKU, with a `$ I/O` column joined from the live Copilot SDK model list (USD per M tokens). Subtotals and included limits from quota snapshots are shown when available.
-Billed quantities and USD amounts remain available in YAML output (`-f yaml`), which also includes `ioSummary` and `tokenPricing` per usage item when a model match is found.
+The default table focuses on **Used** credits or premium requests grouped by Period and SKU with subtotals and included limits from quota snapshots when available.
+Billed quantities and USD amounts remain available in YAML output (`-f yaml`).
+Use `--with-pricing` to append a second table that joins each usage row with live Copilot SDK model token pricing (`$ I/O` per M tokens). Unmatched models show `-` in the pricing column.
+With `--with-pricing -f yaml`, reports also include `withPricing`, `ioSummary`, and `tokenPricing` fields when a model match is found.
 Supports relative date/month/year by specifying negative values (e.g., `-d -1` for yesterday).
 Multiple periods can be shown with the `--last` flag.
 The `Period` column can be sorted in ascending or descending order with the `--sort-order` flag (default is `desc`).
@@ -157,8 +159,14 @@ The `Period` column can be sorted in ascending or descending order with the `--s
 # Current month (auto-detects billing mode)
 copilot-show usage
 
+# Join usage with live SDK model token pricing
+copilot-show usage --with-pricing
+
 # Full billing fields (including billed quantities and USD amounts)
 copilot-show usage -f yaml
+
+# Usage plus joined pricing in YAML
+copilot-show usage --with-pricing -f yaml
 
 # Force premium-request billing
 copilot-show usage --billing premium-request
