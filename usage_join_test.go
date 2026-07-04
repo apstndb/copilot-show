@@ -67,11 +67,11 @@ func TestFormatUsageItemIOSummaryUnmatched(t *testing.T) {
 	}
 }
 
-func TestUsageTableHeaderIncludesPricingColumn(t *testing.T) {
+func TestUsageTableHeaderSimplifiedColumns(t *testing.T) {
 	t.Parallel()
 
 	header, rightAligned := usageTableHeader(usageBillingAICredits, false)
-	want := []string{"SKU", "Model", "Used (credits)", modelsAPIPricingColumnHeader}
+	want := []string{"SKU", "Model", "Used (credits)"}
 	if len(header) != len(want) {
 		t.Fatalf("header = %#v, want %#v", header, want)
 	}
@@ -80,13 +80,62 @@ func TestUsageTableHeaderIncludesPricingColumn(t *testing.T) {
 			t.Fatalf("header[%d] = %q, want %q", i, header[i], column)
 		}
 	}
-	if len(rightAligned) != 2 || rightAligned[0] != 2 || rightAligned[1] != 3 {
-		t.Fatalf("rightAligned = %#v, want [2 3]", rightAligned)
+	if len(rightAligned) != 1 || rightAligned[0] != 2 {
+		t.Fatalf("rightAligned = %#v, want [2]", rightAligned)
 	}
 	for _, column := range header {
-		if column == "Billed (credits)" || column == "Amount (USD)" {
+		if column == "Billed (credits)" || column == "Amount (USD)" || column == modelsAPIPricingColumnHeader {
 			t.Fatalf("default usage header unexpectedly includes %q: %#v", column, header)
 		}
+	}
+}
+
+func TestUsagePricingTableHeader(t *testing.T) {
+	t.Parallel()
+
+	header, rightAligned := usagePricingTableHeader(usageBillingAICredits, false)
+	want := []string{"Model", "Used (credits)", "$ I/O"}
+	if len(header) != len(want) {
+		t.Fatalf("header = %#v, want %#v", header, want)
+	}
+	for i, column := range want {
+		if header[i] != column {
+			t.Fatalf("header[%d] = %q, want %q", i, header[i], column)
+		}
+	}
+	if len(rightAligned) != 1 || rightAligned[0] != 1 {
+		t.Fatalf("rightAligned = %#v, want [1]", rightAligned)
+	}
+}
+
+func TestJoinUsageWithPricing(t *testing.T) {
+	t.Parallel()
+
+	lookup := buildModelPricingLookup([]copilot.ModelInfo{{
+		ID:   "claude-sonnet-4.6",
+		Name: "Claude Sonnet 4.6",
+		Billing: &copilot.ModelBilling{
+			TokenPrices: &rpc.ModelBillingTokenPrices{
+				BatchSize:   ptrInt64(1_000_000),
+				InputPrice:  ptrFloat64(100),
+				OutputPrice: ptrFloat64(500),
+			},
+		},
+	}})
+
+	joined := joinUsageWithPricing([]usageFlatItem{
+		{Period: "2026-06", SKU: "copilot-chat", Model: "Claude Sonnet 4.6", GrossQuantity: 42.5},
+		{Period: "2026-06", SKU: "copilot-chat", Model: "unknown-model", GrossQuantity: 3},
+	}, lookup)
+
+	if len(joined) != 2 {
+		t.Fatalf("joined len = %d, want 2", len(joined))
+	}
+	if !joined[0].PricingMatched || joined[0].Used != 42.5 {
+		t.Fatalf("matched row = %#v", joined[0])
+	}
+	if joined[1].PricingMatched || joined[1].TokenPricing != nil {
+		t.Fatalf("unmatched row = %#v, want no pricing", joined[1])
 	}
 }
 
@@ -95,19 +144,7 @@ func TestEnrichUsageResponsesForYAMLAddsPricing(t *testing.T) {
 
 	responses := []*usageResponse{{
 		User: "octocat",
-		UsageItems: []struct {
-			Product          string  `json:"product" yaml:"product"`
-			SKU              string  `json:"sku" yaml:"sku"`
-			Model            string  `json:"model" yaml:"model"`
-			UnitType         string  `json:"unitType" yaml:"unitType"`
-			PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
-			GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
-			GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
-			DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
-			DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
-			NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
-			NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
-		}{{
+		UsageItems: []usageItem{{
 			Model:         "gpt-5.4",
 			GrossQuantity: 12.5,
 		}},
@@ -151,19 +188,7 @@ func TestFlattenUsageResponses(t *testing.T) {
 				Month *int `json:"month" yaml:"month"`
 				Day   *int `json:"day" yaml:"day"`
 			}{Year: 2026, Month: &month, Day: &day},
-			UsageItems: []struct {
-				Product          string  `json:"product" yaml:"product"`
-				SKU              string  `json:"sku" yaml:"sku"`
-				Model            string  `json:"model" yaml:"model"`
-				UnitType         string  `json:"unitType" yaml:"unitType"`
-				PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
-				GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
-				GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
-				DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
-				DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
-				NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
-				NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
-			}{
+			UsageItems: []usageItem{
 				{SKU: "copilot-chat", Model: "gpt-5.4", GrossQuantity: 10, NetQuantity: 0, NetAmount: 0},
 			},
 		},

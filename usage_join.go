@@ -4,13 +4,29 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/apstndb/copilot-show/pkg/analyze"
 	"github.com/apstndb/copilot-show/pkg/modeldocs"
+	"github.com/apstndb/copilot-show/pkg/render"
 	copilot "github.com/github/copilot-sdk/go"
 )
+
+type usageItem struct {
+	Product          string  `json:"product" yaml:"product"`
+	SKU              string  `json:"sku" yaml:"sku"`
+	Model            string  `json:"model" yaml:"model"`
+	UnitType         string  `json:"unitType" yaml:"unitType"`
+	PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
+	GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
+	GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
+	DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
+	DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
+	NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
+	NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
+}
 
 type usageFlatItem struct {
 	Period        string
@@ -19,6 +35,15 @@ type usageFlatItem struct {
 	GrossQuantity float64
 	NetQuantity   float64
 	NetAmount     float64
+}
+
+type usageWithPricingRow struct {
+	Period         string                     `json:"period,omitempty" yaml:"period,omitempty"`
+	SKU            string                     `json:"sku,omitempty" yaml:"sku,omitempty"`
+	Model          string                     `json:"model" yaml:"model"`
+	Used           float64                    `json:"used" yaml:"used"`
+	TokenPricing   *modeldocs.SDKTokenPricing `json:"tokenPricing,omitempty" yaml:"tokenPricing,omitempty"`
+	PricingMatched bool                       `json:"pricingMatched" yaml:"pricingMatched"`
 }
 
 type usageItemEnriched struct {
@@ -49,11 +74,22 @@ type usageResponseEnriched struct {
 
 func usageTableHeader(billingMode string, multiPeriod bool) ([]string, []int) {
 	usedHeader, _ := usageQuantityColumnHeaders(billingMode)
-	header := []string{"Period", "SKU", "Model", usedHeader, modelsAPIPricingColumnHeader}
-	rightAligned := []int{len(header) - 2, len(header) - 1}
+	header := []string{"Period", "SKU", "Model", usedHeader}
+	rightAligned := []int{len(header) - 1}
 	if !multiPeriod {
 		header = header[1:]
-		rightAligned = []int{len(header) - 2, len(header) - 1}
+		rightAligned = []int{len(header) - 1}
+	}
+	return header, rightAligned
+}
+
+func usagePricingTableHeader(billingMode string, multiPeriod bool) ([]string, []int) {
+	usedHeader, _ := usageQuantityColumnHeaders(billingMode)
+	header := []string{"Period", "Model", usedHeader, modelsAPIPricingColumnHeader}
+	rightAligned := []int{len(header) - 2}
+	if !multiPeriod {
+		header = header[1:]
+		rightAligned = []int{len(header) - 2}
 	}
 	return header, rightAligned
 }
@@ -81,14 +117,7 @@ func usageModelPricingKeys(name string) []string {
 			if key == "" {
 				continue
 			}
-			duplicate := false
-			for _, existing := range keys {
-				if existing == key {
-					duplicate = true
-					break
-				}
-			}
-			if !duplicate {
+			if !slices.Contains(keys, key) {
 				keys = append(keys, key)
 			}
 		}
@@ -103,7 +132,7 @@ func buildModelPricingLookup(models []copilot.ModelInfo) map[string]*modeldocs.S
 		if pricing == nil {
 			continue
 		}
-		cloned := cloneSDKTokenPricing(pricing)
+		cloned := modeldocs.CloneSDKTokenPricing(pricing)
 		for _, name := range []string{model.Name, model.ID} {
 			for _, key := range usageModelPricingKeys(name) {
 				lookup[key] = cloned
@@ -132,19 +161,7 @@ func formatUsageItemIOSummary(modelName string, lookup map[string]*modeldocs.SDK
 	return "-"
 }
 
-func enrichUsageItem(item struct {
-	Product          string  `json:"product" yaml:"product"`
-	SKU              string  `json:"sku" yaml:"sku"`
-	Model            string  `json:"model" yaml:"model"`
-	UnitType         string  `json:"unitType" yaml:"unitType"`
-	PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
-	GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
-	GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
-	DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
-	DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
-	NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
-	NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
-}, lookup map[string]*modeldocs.SDKTokenPricing) usageItemEnriched {
+func enrichUsageItem(item usageItem, lookup map[string]*modeldocs.SDKTokenPricing) usageItemEnriched {
 	enriched := usageItemEnriched{
 		Product:          item.Product,
 		SKU:              item.SKU,
@@ -160,7 +177,7 @@ func enrichUsageItem(item struct {
 	}
 	if pricing, ok := lookupUsageModelPricing(item.Model, lookup); ok {
 		enriched.IOSummary = modeldocs.SDKTokenPricingIOSummary(pricing)
-		enriched.TokenPricing = cloneSDKTokenPricing(pricing)
+		enriched.TokenPricing = modeldocs.CloneSDKTokenPricing(pricing)
 	}
 	return enriched
 }
@@ -183,6 +200,25 @@ func enrichUsageResponsesForYAML(responses []*usageResponse, lookup map[string]*
 		return enriched[0]
 	}
 	return enriched
+}
+
+func joinUsageWithPricing(items []usageFlatItem, lookup map[string]*modeldocs.SDKTokenPricing) []usageWithPricingRow {
+	rows := make([]usageWithPricingRow, 0, len(items))
+	for _, item := range items {
+		pricing, matched := lookupUsageModelPricing(item.Model, lookup)
+		row := usageWithPricingRow{
+			Period:         item.Period,
+			SKU:            item.SKU,
+			Model:          item.Model,
+			Used:           item.GrossQuantity,
+			PricingMatched: matched,
+		}
+		if matched {
+			row.TokenPricing = modeldocs.CloneSDKTokenPricing(pricing)
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func formatUsageUsedValue(value float64) string {
@@ -224,8 +260,37 @@ func fetchUsageModelPricingLookup(ctx context.Context, client *copilot.Client) (
 func usageModelPricingLookupOrWarn(ctx context.Context, client *copilot.Client) map[string]*modeldocs.SDKTokenPricing {
 	lookup, err := fetchUsageModelPricingLookup(ctx, client)
 	if err != nil {
-		log.Printf("Warning: could not fetch model pricing for usage table: %v", err)
+		log.Printf("Warning: could not fetch model pricing for usage join: %v", err)
 		return nil
 	}
 	return lookup
+}
+
+func renderUsageWithPricingTable(items []usageFlatItem, billingMode string, multiPeriod bool, lookup map[string]*modeldocs.SDKTokenPricing) {
+	if lookup == nil {
+		return
+	}
+
+	joined := joinUsageWithPricing(items, lookup)
+	header, rightAligned := usagePricingTableHeader(billingMode, multiPeriod)
+	fmt.Println()
+	fmt.Println("--- Usage with Model Pricing ---")
+	table := render.CreateTable(header, rightAligned, multiPeriod, multiPeriod, tableMode)
+	for _, row := range joined {
+		pricingSummary := "-"
+		if row.PricingMatched {
+			pricingSummary = modeldocs.SDKTokenPricingIOSummary(row.TokenPricing)
+		}
+		cells := []string{
+			row.Period,
+			row.Model,
+			formatUsageUsedValue(row.Used),
+			pricingSummary,
+		}
+		if !multiPeriod {
+			cells = cells[1:]
+		}
+		table.Append(cells)
+	}
+	table.Render()
 }

@@ -9,13 +9,17 @@ import (
 	"io"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"text/tabwriter"
 	"time"
 	"unicode"
@@ -63,6 +67,22 @@ var (
 	wrapLongText          bool
 	enableConfigDiscovery bool
 	uiVersion             string
+	unsafeApproveAll      bool
+)
+
+var offlineCommands = map[string]struct{}{
+	"stats":           {},
+	"turns":           {},
+	"history":         {},
+	"graph":           {},
+	"validate-events": {},
+	"resume-branches": {},
+}
+
+var (
+	copilotClientStarted  bool
+	copilotClientStartMu  sync.Mutex
+	copilotClientStartErr error
 )
 
 func cliVersion() string {
@@ -189,13 +209,16 @@ func configureShowHiddenHelp(root *cobra.Command, showHidden *bool) {
 }
 
 func main() {
-	// 1. Initialize Copilot CLI client
 	client := copilot.NewClient(nil)
 	ctx := context.Background()
-	if err := client.Start(ctx); err != nil {
-		log.Fatalf("Failed to start client: %v", err)
-	}
-	defer client.Stop()
+	defer func() {
+		copilotClientStartMu.Lock()
+		started := copilotClientStarted
+		copilotClientStartMu.Unlock()
+		if started {
+			client.Stop()
+		}
+	}()
 
 	var showHiddenHelp bool
 	rootCmd := &cobra.Command{
@@ -203,6 +226,16 @@ func main() {
 		Short:   "A tool to inspect GitHub Copilot information",
 		Version: cliVersion(),
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			switch outputFormat {
+			case "table", "yaml":
+			default:
+				return fmt.Errorf("invalid --format %q: expected %q or %q", outputFormat, "table", "yaml")
+			}
+			switch tableMode {
+			case "default", "ascii", "markdown":
+			default:
+				return fmt.Errorf("invalid --table-mode %q: expected default, ascii, or markdown", tableMode)
+			}
 			switch uiVersion {
 			case uiVersionOld, uiVersionNew:
 			default:
@@ -210,7 +243,10 @@ func main() {
 			}
 			render.SetTableWidthOverride(tableWidth)
 			render.SetTableFoldEnabled(uiVersion == uiVersionNew || wrapLongText)
-			return nil
+			if wantsHelpOrVersion(cmd) || !commandNeedsCopilotClient(cmd) {
+				return nil
+			}
+			return ensureCopilotClient(ctx, client)
 		},
 		Run: func(cmd *cobra.Command, args []string) {
 			_ = cmd.Help()
@@ -223,9 +259,13 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&wrapLongText, "wrap-long-text", false, "Show full long text in table columns with terminal-width wrapping instead of compact truncation")
 	rootCmd.PersistentFlags().BoolVar(&enableConfigDiscovery, "discover", false, "Enable automatic MCP and skill config discovery when creating sessions (e.g. .mcp.json, project skill directories)")
 	rootCmd.PersistentFlags().BoolVar(&showHiddenHelp, "show-hidden", false, "Include hidden commands and hidden flags in help output")
+	rootCmd.PersistentFlags().BoolVar(&unsafeApproveAll, "unsafe-approve-all", false, "Hidden: approve all SDK permission requests instead of denying by default")
 	rootCmd.PersistentFlags().StringVar(&uiVersion, "ui-version", uiVersionNew, "Hidden UI selector for temporary A/B testing (old, new)")
 	if err := rootCmd.PersistentFlags().MarkHidden("ui-version"); err != nil {
 		log.Fatalf("Failed to hide ui-version flag: %v", err)
+	}
+	if err := rootCmd.PersistentFlags().MarkHidden("unsafe-approve-all"); err != nil {
+		log.Fatalf("Failed to hide unsafe-approve-all flag: %v", err)
 	}
 
 	rootCmd.AddCommand(newQuotaCmd(client))
@@ -274,13 +314,69 @@ func main() {
 	}
 }
 
-func printYAML(v interface{}) {
+func ensureCopilotClient(ctx context.Context, client *copilot.Client) error {
+	copilotClientStartMu.Lock()
+	defer copilotClientStartMu.Unlock()
+	if copilotClientStarted {
+		return copilotClientStartErr
+	}
+	copilotClientStartErr = client.Start(ctx)
+	copilotClientStarted = true
+	return copilotClientStartErr
+}
+
+func commandNeedsCopilotClient(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Name() == "copilot-show" {
+		return false
+	}
+	_, offline := offlineCommands[cmd.Name()]
+	return !offline
+}
+
+func wantsHelpOrVersion(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	for current := cmd; current != nil; current = current.Parent() {
+		if flag := current.Flags().Lookup("help"); flag != nil && flag.Changed {
+			return true
+		}
+	}
+	if cmd.Version != "" {
+		if flag := cmd.Flags().Lookup("version"); flag != nil && flag.Changed {
+			return true
+		}
+	}
+	return false
+}
+
+func printYAML(v any) error {
 	data, err := yaml.MarshalWithOptions(v, yaml.UseJSONMarshaler())
 	if err != nil {
-		log.Printf("Error marshaling YAML: %v", err)
-		return
+		return fmt.Errorf("marshaling YAML: %w", err)
 	}
-	fmt.Print(string(data))
+	if _, err := fmt.Fprint(os.Stdout, string(data)); err != nil {
+		return fmt.Errorf("writing YAML: %w", err)
+	}
+	return nil
+}
+
+func emitYAML(v any) {
+	if err := printYAML(v); err != nil {
+		log.Printf("%v", err)
+	}
+}
+
+func permissionHandler() copilot.PermissionHandlerFunc {
+	if unsafeApproveAll {
+		return copilot.PermissionHandler.ApproveAll
+	}
+	return func(_ copilot.PermissionRequest, _ copilot.PermissionInvocation) (rpc.PermissionDecision, error) {
+		return &rpc.PermissionDecisionReject{}, nil
+	}
 }
 
 func workingDirectoryForSession() string {
@@ -291,7 +387,7 @@ func workingDirectoryForSession() string {
 func createSessionConfig() *copilot.SessionConfig {
 	cfg := &copilot.SessionConfig{
 		ClientName:          copilotSDKClientName,
-		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
+		OnPermissionRequest: permissionHandler(),
 		WorkingDirectory:    workingDirectoryForSession(),
 	}
 	if enableConfigDiscovery {
@@ -304,7 +400,7 @@ func resumeSessionConfig() *copilot.ResumeSessionConfig {
 	cfg := &copilot.ResumeSessionConfig{
 		ClientName:          copilotSDKClientName,
 		SuppressResumeEvent: true,
-		OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
+		OnPermissionRequest: permissionHandler(),
 	}
 	if enableConfigDiscovery {
 		cfg.EnableConfigDiscovery = copilot.Bool(true)
@@ -348,7 +444,7 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if format == "yaml" {
-		printYAML(quota)
+		emitYAML(quota)
 		return
 	}
 
@@ -497,7 +593,7 @@ func showModels(ctx context.Context, client *copilot.Client, format string, useL
 	sortRuntimeModelViews(modelSnapshot.Models)
 
 	if format == "yaml" {
-		printYAML(modelSnapshot)
+		emitYAML(modelSnapshot)
 		return
 	}
 
@@ -576,7 +672,7 @@ func buildRuntimeModelsSnapshot(models []copilot.ModelInfo, snapshot modeldocs.S
 			ID:                        model.ID,
 			Name:                      model.Name,
 			BillingMultiplier:         cloneOptionalFloat64(modelBillingMultiplier(model)),
-			TokenPricing:              cloneSDKTokenPricing(tokenPricing),
+			TokenPricing:              modeldocs.CloneSDKTokenPricing(tokenPricing),
 			MaxContextWindowTokens:    intFromPtr(model.Capabilities.Limits.MaxContextWindowTokens),
 			MaxPromptTokens:           cloneOptionalInt(model.Capabilities.Limits.MaxPromptTokens),
 			SupportsVision:            supportsVision,
@@ -618,30 +714,6 @@ func sortRuntimeModelViews(models []runtimeModelView) {
 		}
 		return natural.Less(strings.ToLower(models[i].Name), strings.ToLower(models[j].Name))
 	})
-}
-
-func cloneSDKTokenPricing(pricing *modeldocs.SDKTokenPricing) *modeldocs.SDKTokenPricing {
-	if pricing == nil {
-		return nil
-	}
-	cloned := &modeldocs.SDKTokenPricing{}
-	if pricing.InputUSDPerMTok != nil {
-		value := *pricing.InputUSDPerMTok
-		cloned.InputUSDPerMTok = &value
-	}
-	if pricing.CachedInputUSDPerMTok != nil {
-		value := *pricing.CachedInputUSDPerMTok
-		cloned.CachedInputUSDPerMTok = &value
-	}
-	if pricing.CacheWriteUSDPerMTok != nil {
-		value := *pricing.CacheWriteUSDPerMTok
-		cloned.CacheWriteUSDPerMTok = &value
-	}
-	if pricing.OutputUSDPerMTok != nil {
-		value := *pricing.OutputUSDPerMTok
-		cloned.OutputUSDPerMTok = &value
-	}
-	return cloned
 }
 
 func cloneOptionalInt(value *int) *int {
@@ -983,12 +1055,12 @@ func showModelDocs(ctx context.Context, client *copilot.Client, format string, u
 			if visibleOnly {
 				filtered := snapshot
 				filtered.Models = filterJoinedModelsVisibleOnly(snapshot.Models)
-				printYAML(filtered)
+				emitYAML(filtered)
 			} else {
-				printYAML(snapshot)
+				emitYAML(snapshot)
 			}
 		} else {
-			printYAML(buildCLIFocusedModelDocsSnapshot(snapshot, visibleOnly))
+			emitYAML(buildCLIFocusedModelDocsSnapshot(snapshot, visibleOnly))
 		}
 		return
 	}
@@ -1130,7 +1202,7 @@ func buildCLIFocusedModelDocsSnapshot(snapshot modeldocs.Snapshot, visibleOnly b
 			ReleaseStatus: model.ReleaseStatus,
 			VisibleNow:    model.VisibleNow,
 			Plans:         model.Plans,
-			TokenPricing:  cloneSDKTokenPricing(firstJoinedModelTokenPricing(model)),
+			TokenPricing:  modeldocs.CloneSDKTokenPricing(firstJoinedModelTokenPricing(model)),
 			LiveModels:    append([]modeldocs.LiveMatch(nil), model.LiveModels...),
 		})
 	}
@@ -1170,7 +1242,7 @@ func showTools(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if format == "yaml" {
-		printYAML(tools)
+		emitYAML(tools)
 		return
 	}
 
@@ -1211,7 +1283,7 @@ func showAgents(ctx context.Context, client *copilot.Client, format string) {
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1251,7 +1323,7 @@ func showSkills(ctx context.Context, client *copilot.Client, format string) {
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1304,7 +1376,7 @@ func showExtensions(ctx context.Context, client *copilot.Client, format string) 
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1354,7 +1426,7 @@ func showPlugins(ctx context.Context, client *copilot.Client, format string) {
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1403,7 +1475,7 @@ func showMcp(ctx context.Context, client *copilot.Client, format string) {
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1457,7 +1529,7 @@ func showMode(ctx context.Context, client *copilot.Client, format string) {
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1488,7 +1560,7 @@ func showPlan(ctx context.Context, client *copilot.Client, format string) {
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1546,7 +1618,7 @@ func showWorkspace(ctx context.Context, client *copilot.Client, format string, s
 		}
 
 		if format == "yaml" {
-			printYAML(result)
+			emitYAML(result)
 			return nil
 		}
 
@@ -1604,7 +1676,7 @@ func showReadFile(ctx context.Context, client *copilot.Client, path string, form
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1635,7 +1707,7 @@ func showPing(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if format == "yaml" {
-		printYAML(res)
+		emitYAML(res)
 		return
 	}
 
@@ -1663,7 +1735,7 @@ func showCurrentModel(ctx context.Context, client *copilot.Client, format string
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1698,7 +1770,7 @@ func showCurrentAgent(ctx context.Context, client *copilot.Client, format string
 		}
 
 		if format == "yaml" {
-			printYAML(res)
+			emitYAML(res)
 			return nil
 		}
 
@@ -1747,7 +1819,7 @@ func showStatus(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if format == "yaml" {
-		printYAML(combined)
+		emitYAML(combined)
 		return
 	}
 
@@ -1829,7 +1901,7 @@ func showAccount(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if format == "yaml" {
-		printYAML(snapshot)
+		emitYAML(snapshot)
 		return
 	}
 
@@ -1893,11 +1965,6 @@ func authInfoView(auth rpc.AuthInfo) accountAuthView {
 	}
 	view := accountAuthView{Type: string(auth.Type())}
 	switch info := auth.(type) {
-	case rpc.GhCLIAuthInfo:
-		view.Login = info.Login
-		view.Host = info.Host
-		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
-		view.HasSecret = info.Token != ""
 	case *rpc.GhCLIAuthInfo:
 		if info != nil {
 			view.Login = info.Login
@@ -1905,21 +1972,10 @@ func authInfoView(auth rpc.AuthInfo) accountAuthView {
 			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
 			view.HasSecret = info.Token != ""
 		}
-	case rpc.CopilotAPITokenAuthInfo:
-		view.Host = string(info.Host)
-		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
 	case *rpc.CopilotAPITokenAuthInfo:
 		if info != nil {
 			view.Host = string(info.Host)
 			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
-		}
-	case rpc.EnvAuthInfo:
-		view.Host = info.Host
-		view.EnvVar = info.EnvVar
-		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
-		view.HasSecret = info.Token != ""
-		if info.Login != nil {
-			view.Login = *info.Login
 		}
 	case *rpc.EnvAuthInfo:
 		if info != nil {
@@ -1931,25 +1987,29 @@ func authInfoView(auth rpc.AuthInfo) accountAuthView {
 				view.Login = *info.Login
 			}
 		}
-	case rpc.APIKeyAuthInfo:
-		view.Host = info.Host
-		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
-		view.HasSecret = info.APIKey != ""
 	case *rpc.APIKeyAuthInfo:
 		if info != nil {
 			view.Host = info.Host
 			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
 			view.HasSecret = info.APIKey != ""
 		}
-	case rpc.HMACAuthInfo:
-		view.Host = string(info.Host)
-		view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
-		view.HasSecret = info.HMAC != ""
 	case *rpc.HMACAuthInfo:
 		if info != nil {
 			view.Host = string(info.Host)
 			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
 			view.HasSecret = info.HMAC != ""
+		}
+	case *rpc.TokenAuthInfo:
+		if info != nil {
+			view.Host = info.Host
+			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
+			view.HasSecret = info.Token != ""
+		}
+	case *rpc.UserAuthInfo:
+		if info != nil {
+			view.Login = info.Login
+			view.Host = info.Host
+			view.CopilotPlan = copilotPlanFromUser(info.CopilotUser)
 		}
 	}
 	return view
@@ -1996,7 +2056,7 @@ func showMcpConfig(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if format == "yaml" {
-		printYAML(struct {
+		emitYAML(struct {
 			Servers []mcpConfigRow `json:"servers" yaml:"servers"`
 		}{
 			Servers: rows,
@@ -2160,7 +2220,7 @@ func showDiscover(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if format == "yaml" {
-		printYAML(snapshot)
+		emitYAML(snapshot)
 		return
 	}
 
@@ -2372,7 +2432,7 @@ func showSessionMetadata(ctx context.Context, client *copilot.Client, sessionID 
 		}
 
 		if format == "yaml" {
-			printYAML(struct {
+			emitYAML(struct {
 				SessionID string                       `json:"sessionId" yaml:"sessionId"`
 				Metadata  *rpc.SessionMetadataSnapshot `json:"metadata" yaml:"metadata"`
 			}{
@@ -2427,13 +2487,13 @@ func newSessionAuthCmd(client *copilot.Client) *cobra.Command {
 
 func showSessionAuth(ctx context.Context, client *copilot.Client, sessionID string, format string) {
 	err := withResumedSession(ctx, client, sessionID, func(session *copilot.Session) error {
-		auth, err := session.RPC.Auth.GetStatus(ctx)
+		auth, err := session.RPC.GitHubAuth.GetStatus(ctx)
 		if err != nil {
 			return err
 		}
 
 		if format == "yaml" {
-			printYAML(struct {
+			emitYAML(struct {
 				SessionID string                 `json:"sessionId" yaml:"sessionId"`
 				Auth      *rpc.SessionAuthStatus `json:"auth" yaml:"auth"`
 			}{
@@ -2483,7 +2543,7 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 		}
 
 		if format == "yaml" {
-			printYAML(struct {
+			emitYAML(struct {
 				SessionID string                     `json:"sessionId" yaml:"sessionId"`
 				Metrics   *rpc.UsageGetMetricsResult `json:"metrics" yaml:"metrics"`
 			}{
@@ -2599,7 +2659,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 			ForegroundSession: fgID,
 			LocalPIDs:         localStates,
 		}
-		printYAML(combined)
+		emitYAML(combined)
 		return
 	}
 
@@ -2640,7 +2700,7 @@ func showSessions(ctx context.Context, client *copilot.Client, format string) {
 					process, err := os.FindProcess(pid)
 					if err == nil {
 						// On Unix, Signal(0) checks if process is alive
-						if err := process.Signal(os.Signal(nil)); err == nil {
+						if err := process.Signal(syscall.Signal(0)); err == nil {
 							alive = true
 							break
 						}
@@ -2837,13 +2897,55 @@ func resolveSessionID(ctx context.Context, client *copilot.Client, args []string
 	if len(args) > 0 {
 		return args[0], nil
 	}
-	if fg, _ := client.GetForegroundSessionID(ctx); fg != nil {
+	var fgErr, lastErr error
+	if fg, err := client.GetForegroundSessionID(ctx); err != nil {
+		fgErr = err
+	} else if fg != nil {
 		return *fg, nil
 	}
-	if last, _ := client.GetLastSessionID(ctx); last != nil {
+	if last, err := client.GetLastSessionID(ctx); err != nil {
+		lastErr = err
+	} else if last != nil {
 		return *last, nil
 	}
+	if sessionID, ok := resolveLocalSessionID(); ok {
+		return sessionID, nil
+	}
+	if fgErr != nil || lastErr != nil {
+		return "", fmt.Errorf("could not resolve session ID (foreground: %v; last: %v)", fgErr, lastErr)
+	}
 	return "", fmt.Errorf("no session ID provided and no foreground/last session found")
+}
+
+func resolveLocalSessionID() (string, bool) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false
+	}
+	stateDir := filepath.Join(home, ".copilot", "session-state")
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		return "", false
+	}
+	var (
+		bestID  string
+		bestMod time.Time
+	)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		eventsPath := filepath.Join(stateDir, entry.Name(), "events.jsonl")
+		info, err := os.Stat(eventsPath)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(bestMod) {
+			bestMod = info.ModTime()
+			bestID = entry.Name()
+		}
+	}
+	return bestID, bestID != ""
 }
 
 func formatOptionalString(value *string) string {
@@ -2921,10 +3023,6 @@ func showHistory(ctx context.Context, client *copilot.Client, sessionID string, 
 		showHistorySpans(sessionID, format, historyGroupBy)
 		return
 	}
-	if uiVersion == uiVersionOld {
-		showHistoryOld(sessionID, format)
-		return
-	}
 	showHistoryNew(sessionID, format)
 }
 
@@ -2986,6 +3084,7 @@ func newValidateEventsCmd(client *copilot.Client) *cobra.Command {
 func newUsageCmd(client *copilot.Client) *cobra.Command {
 	var year, month, day, last int
 	var product, model, sortOrder, billing string
+	var withPricing bool
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Show detailed billing usage from GitHub API",
@@ -3043,7 +3142,12 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 				log.Print(err)
 				return
 			}
-			showUsage(cmd.Context(), client, outputFormat, year, month, day, product, model, last, sortOrder, mode)
+			resolvedSortOrder, err := parseUsageSortOrder(sortOrder)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			showUsage(cmd.Context(), client, outputFormat, year, month, day, product, model, last, resolvedSortOrder, mode, withPricing)
 		},
 	}
 	cmd.Flags().IntVarP(&year, "year", "y", 0, "Year for usage report (positive for absolute, negative for relative)")
@@ -3056,6 +3160,7 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 	cmd.Flags().MarkHidden("model")
 	cmd.Flags().StringVar(&sortOrder, "sort-order", "desc", "Sort order for Period (asc, desc)")
 	cmd.Flags().StringVar(&billing, "billing", usageBillingAuto, "Billing unit for the usage report (premium-request, ai-credits, auto)")
+	cmd.Flags().BoolVar(&withPricing, "with-pricing", false, "Join usage rows with live SDK model token pricing ($ I/O per M tokens)")
 	return cmd
 }
 
@@ -3065,25 +3170,14 @@ type usageResponse struct {
 		Month *int `json:"month" yaml:"month"`
 		Day   *int `json:"day" yaml:"day"`
 	} `json:"timePeriod" yaml:"timePeriod"`
-	User       string `json:"user" yaml:"user"`
-	UsageItems []struct {
-		Product          string  `json:"product" yaml:"product"`
-		SKU              string  `json:"sku" yaml:"sku"`
-		Model            string  `json:"model" yaml:"model"`
-		UnitType         string  `json:"unitType" yaml:"unitType"`
-		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
-		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
-		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
-		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
-		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
-		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
-		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
-	} `json:"usageItems" yaml:"usageItems"`
+	User       string      `json:"user" yaml:"user"`
+	UsageItems []usageItem `json:"usageItems" yaml:"usageItems"`
 }
 
 type usageReportOutput struct {
-	BillingMode string `json:"billingMode" yaml:"billingMode"`
-	Reports     any    `json:"reports" yaml:"reports"`
+	BillingMode string                `json:"billingMode" yaml:"billingMode"`
+	Reports     any                   `json:"reports" yaml:"reports"`
+	WithPricing []usageWithPricingRow `json:"withPricing,omitempty" yaml:"withPricing,omitempty"`
 }
 
 func parseUsageBillingMode(raw string) (string, error) {
@@ -3107,20 +3201,26 @@ func usageBillingAPISegment(billingMode string) string {
 }
 
 func buildUsageAPIPath(username string, year, month, day int, product, model, billingMode string) string {
-	path := fmt.Sprintf("/users/%s/settings/billing/%s/usage?year=%d", username, usageBillingAPISegment(billingMode), year)
+	vals := url.Values{}
+	vals.Set("year", strconv.Itoa(year))
 	if month > 0 {
-		path += fmt.Sprintf("&month=%d", month)
+		vals.Set("month", strconv.Itoa(month))
 	}
 	if day > 0 {
-		path += fmt.Sprintf("&day=%d", day)
+		vals.Set("day", strconv.Itoa(day))
 	}
 	if product != "" {
-		path += fmt.Sprintf("&product=%s", product)
+		vals.Set("product", product)
 	}
 	if model != "" {
-		path += fmt.Sprintf("&model=%s", model)
+		vals.Set("model", model)
 	}
-	return path
+	path := fmt.Sprintf("/users/%s/settings/billing/%s/usage", username, usageBillingAPISegment(billingMode))
+	query := vals.Encode()
+	if query == "" {
+		return path
+	}
+	return path + "?" + query
 }
 
 func usageQuantityColumnHeaders(billingMode string) (used, billed string) {
@@ -3214,16 +3314,28 @@ func formatOptionalCredits(nano *float64) string {
 	return strconv.FormatFloat(nanoAiuToCredits(*nano), 'f', -1, 64)
 }
 
-func fetchUsage(username string, year, month, day int, product, model, billingMode string) (*usageResponse, error) {
+func parseUsageSortOrder(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "asc":
+		return "asc", nil
+	case "", "desc":
+		return "desc", nil
+	default:
+		return "", fmt.Errorf("invalid --sort-order value %q (want asc or desc)", raw)
+	}
+}
+
+func fetchUsage(ctx context.Context, username string, year, month, day int, product, model, billingMode string) (*usageResponse, error) {
 	path := buildUsageAPIPath(username, year, month, day, product, model, billingMode)
 
-	cmd := exec.Command("gh", "api", path)
+	cmd := exec.CommandContext(ctx, "gh", "api", path)
 	out, err := cmd.Output()
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("Error: %s", string(exitErr.Stderr))
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return nil, fmt.Errorf("gh api: %s", string(exitErr.Stderr))
 		}
-		return nil, fmt.Errorf("Error executing gh api: %v", err)
+		return nil, fmt.Errorf("executing gh api: %w", err)
 	}
 
 	var res usageResponse
@@ -3233,9 +3345,9 @@ func fetchUsage(username string, year, month, day int, product, model, billingMo
 	return &res, nil
 }
 
-func showUsage(ctx context.Context, client *copilot.Client, format string, year, month, day int, product, model string, last int, sortOrder string, billingMode string) {
+func showUsage(ctx context.Context, client *copilot.Client, format string, year, month, day int, product, model string, last int, sortOrder string, billingMode string, withPricing bool) {
 	// 1. Get current username
-	userCmd := exec.Command("gh", "api", "/user", "--jq", ".login")
+	userCmd := exec.CommandContext(ctx, "gh", "api", "/user", "--jq", ".login")
 	userOut, err := userCmd.Output()
 	if err != nil {
 		log.Printf("Error fetching username: %v", err)
@@ -3251,11 +3363,11 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	resolvedBilling := billingMode
 	if billingMode == usageBillingAuto {
 		var premiumProbe, aiCreditsProbe *usageResponse
-		premiumProbe, err = fetchUsage(username, year, month, day, product, model, usageBillingPremiumRequest)
+		premiumProbe, err = fetchUsage(ctx, username, year, month, day, product, model, usageBillingPremiumRequest)
 		if err != nil {
 			log.Printf("Warning: could not probe premium-request usage: %v", err)
 		}
-		aiCreditsProbe, err = fetchUsage(username, year, month, day, product, model, usageBillingAICredits)
+		aiCreditsProbe, err = fetchUsage(ctx, username, year, month, day, product, model, usageBillingAICredits)
 		if err != nil {
 			log.Printf("Warning: could not probe ai-credits usage: %v", err)
 		}
@@ -3288,7 +3400,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 				date := targetDate.AddDate(-i, 0, 0)
 				y, m, d = date.Year(), 0, 0
 			}
-			res, err := fetchUsage(username, y, m, d, product, model, resolvedBilling)
+			res, err := fetchUsage(ctx, username, y, m, d, product, model, resolvedBilling)
 			if err != nil {
 				log.Printf("Failed to fetch usage for %d-%02d-%02d: %v", y, m, d, err)
 				continue
@@ -3296,7 +3408,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 			responses = append(responses, res)
 		}
 	} else {
-		res, err := fetchUsage(username, year, month, day, product, model, resolvedBilling)
+		res, err := fetchUsage(ctx, username, year, month, day, product, model, resolvedBilling)
 		if err != nil {
 			log.Print(err)
 			return
@@ -3305,12 +3417,19 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 
 	if format == "yaml" {
-		pricingLookup := usageModelPricingLookupOrWarn(ctx, client)
-		output := usageReportOutput{
-			BillingMode: resolvedBilling,
-			Reports:     enrichUsageResponsesForYAML(responses, pricingLookup),
+		output := usageReportOutput{BillingMode: resolvedBilling}
+		if len(responses) == 1 {
+			output.Reports = responses[0]
+		} else {
+			output.Reports = responses
 		}
-		printYAML(output)
+		if withPricing {
+			pricingLookup := usageModelPricingLookupOrWarn(ctx, client)
+			flatItems := flattenUsageResponses(responses)
+			output.WithPricing = joinUsageWithPricing(flatItems, pricingLookup)
+			output.Reports = enrichUsageResponsesForYAML(responses, pricingLookup)
+		}
+		emitYAML(output)
 		return
 	}
 
@@ -3342,14 +3461,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	var periods []string
 	periodGroups := make(map[string][]usageFlatItem)
 	for _, item := range flatItems {
-		found := false
-		for _, p := range periods {
-			if p == item.Period {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if !slices.Contains(periods, item.Period) {
 			periods = append(periods, item.Period)
 		}
 		periodGroups[item.Period] = append(periodGroups[item.Period], item)
@@ -3369,7 +3481,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		fmt.Printf("%s: %s\n", usageIncludedLabel(resolvedBilling), strconv.FormatFloat(entitlement, 'f', -1, 64))
 	}
 	multiPeriod := last > 0
-	pricingLookup := usageModelPricingLookupOrWarn(ctx, client)
 	header, rightAligned := usageTableHeader(resolvedBilling, multiPeriod)
 	table := render.CreateTable(header, rightAligned, multiPeriod, multiPeriod, tableMode)
 
@@ -3379,14 +3490,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		var skus []string
 		skuGroups := make(map[string][]usageFlatItem)
 		for _, item := range items {
-			found := false
-			for _, s := range skus {
-				if s == item.SKU {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !slices.Contains(skus, item.SKU) {
 				skus = append(skus, item.SKU)
 			}
 			skuGroups[item.SKU] = append(skuGroups[item.SKU], item)
@@ -3395,12 +3499,11 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		var periodUsedTotal float64
 		for i, sku := range skus {
 			skuItems := skuGroups[sku]
-			var models, useds, ioSummaries []string
+			var models, useds []string
 			var skuUsedTotal float64
 			for _, item := range skuItems {
 				models = append(models, item.Model)
 				useds = append(useds, formatUsageUsedValue(item.GrossQuantity))
-				ioSummaries = append(ioSummaries, formatUsageItemIOSummary(item.Model, pricingLookup))
 				skuUsedTotal += item.GrossQuantity
 			}
 			periodUsedTotal += skuUsedTotal
@@ -3410,7 +3513,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 				sku,
 				strings.Join(models, "\n"),
 				strings.Join(useds, "\n"),
-				strings.Join(ioSummaries, "\n"),
 			}
 
 			if !multiPeriod {
@@ -3425,7 +3527,6 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 					"Subtotal (All SKUs)",
 					"", // Model
 					formatUsageUsedValue(periodUsedTotal),
-					"", // $ I/O
 				}
 				if !multiPeriod {
 					subtotalRow = subtotalRow[1:]
@@ -3436,6 +3537,10 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	}
 	table.Render()
 
+	if withPricing {
+		renderUsageWithPricingTable(flatItems, resolvedBilling, multiPeriod, usageModelPricingLookupOrWarn(ctx, client))
+	}
+
 	fmt.Println("\nNotes:")
 	if resolvedBilling == usageBillingAICredits {
 		fmt.Println("- 'Used (credits)' is the total AI credits consumed.")
@@ -3443,8 +3548,13 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 		fmt.Println("- 'Used (req.)' is the total premium requests consumed.")
 		fmt.Println("- 'req.' stands for 'requests'.")
 	}
-	fmt.Println("- '$ I/O' is live SDK token pricing (USD per M tokens, input/output) from `ListModels`; unmatched models show `-`.")
-	fmt.Println("- Use `-f yaml` for billed quantities, USD amounts, and full token pricing details.")
+	if withPricing {
+		fmt.Println("- `--with-pricing` joins each usage row with live SDK model token pricing (`$ I/O` per M tokens).")
+		fmt.Println("- Unmatched models show `-` in the pricing column; use `-f yaml` for full billed amounts and pricing details.")
+	} else {
+		fmt.Println("- Use `-f yaml` for billed quantities and USD amounts from the GitHub billing API.")
+		fmt.Println("- Use `--with-pricing` to see per-model SDK token pricing alongside usage.")
+	}
 }
 
 type sessionEvent struct {
@@ -3751,7 +3861,7 @@ type sessionEventValidationRowRef struct {
 	Timestamp time.Time
 }
 
-// Mirrors the generated SessionEventType constants (copilot-sdk v1.0.4) so
+// Mirrors the generated SessionEventType constants (copilot-sdk v1.0.5) so
 // validator output can tell whether a row uses a type known to the current SDK.
 var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
 	copilot.SessionEventTypeAbort:                              {},
@@ -6061,15 +6171,6 @@ func formatSignedInt(value int) string {
 	return strconv.Itoa(value)
 }
 
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
-}
-
 func formatAPICostRate(value *float64) string {
 	if value == nil {
 		return "-"
@@ -6205,7 +6306,7 @@ func buildStatsAPICostDisplayLines(stat *analyze.ModelStat) []statsAPICostDispla
 	if estimate != nil {
 		outputLine.Rate = render.FormatFloatCompact(estimate.OutputUSDPerMTok)
 		outputLine.Subtotal = render.FormatUSD(estimate.OutputUSD)
-		if containsString(estimate.MissingPriceComponents, "outputTokens") {
+		if slices.Contains(estimate.MissingPriceComponents, "outputTokens") {
 			outputLine.Subtotal = "-"
 		}
 	}
@@ -6598,10 +6699,6 @@ func eventDepth(id string, eventMap map[string]*sessionEvent, cache map[string]i
 	return depth
 }
 
-func showHistoryOld(sessionID string, format string) {
-	showHistoryNew(sessionID, format)
-}
-
 func showHistoryNew(sessionID string, format string) {
 	if format == "yaml" {
 		rawEvents, err := loadSessionRawEvents(sessionID)
@@ -6609,7 +6706,7 @@ func showHistoryNew(sessionID string, format string) {
 			log.Printf("%v", err)
 			return
 		}
-		printYAML(rawEvents)
+		emitYAML(rawEvents)
 		return
 	}
 
@@ -6698,7 +6795,7 @@ func showHistorySpans(sessionID string, format string, groupBy string) {
 	}
 
 	if format == "yaml" {
-		printYAML(rows)
+		emitYAML(rows)
 		return
 	}
 
@@ -6779,7 +6876,7 @@ func showGraph(ctx context.Context, client *copilot.Client, sessionID string, fo
 	}
 
 	if format == "yaml" {
-		printYAML(summary)
+		emitYAML(summary)
 		return
 	}
 
@@ -6870,7 +6967,7 @@ func showValidateEvents(ctx context.Context, client *copilot.Client, sessionID s
 	}
 
 	if format == "yaml" {
-		printYAML(summary)
+		emitYAML(summary)
 		return
 	}
 
@@ -7014,7 +7111,7 @@ func showResumeBranches(ctx context.Context, client *copilot.Client, sessionID s
 	}
 
 	if format == "yaml" {
-		printYAML(report)
+		emitYAML(report)
 		return
 	}
 
@@ -7081,7 +7178,7 @@ func showTurnsV2(sessionID string, format string) {
 
 	turns := buildTurnWindows(events)
 	if format == "yaml" {
-		printYAML(turns)
+		emitYAML(turns)
 		return
 	}
 
@@ -7212,9 +7309,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 		}
 		if err := visitJSONLObjects(eventsPath, func(ev map[string]any) error {
 			if !showAllHistory {
-				timestampStr, _ := ev["timestamp"].(string)
-				ts, err := time.Parse(time.RFC3339, timestampStr)
-				if err == nil && ts.Before(startOfMonth) {
+				if ts, ok := parseSessionTimestamp(ev["timestamp"]); ok && ts.Before(startOfMonth) {
 					return nil
 				}
 			}
@@ -7349,7 +7444,7 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 			}
 			payload["modelCatalogSource"] = "https://docs.github.com/en/copilot/reference/ai-models/supported-models"
 		}
-		printYAML(payload)
+		emitYAML(payload)
 		return
 	}
 

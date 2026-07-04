@@ -497,7 +497,7 @@ func TestBuildRuntimeModelsSnapshotUsesSDKTokenPricing(t *testing.T) {
 func TestAuthInfoViewRedactsSecrets(t *testing.T) {
 	t.Parallel()
 
-	got := authInfoView(rpc.GhCLIAuthInfo{
+	got := authInfoView(&rpc.GhCLIAuthInfo{
 		Login: "octocat",
 		Host:  "https://github.com",
 		Token: "secret-token",
@@ -754,9 +754,9 @@ func TestFormatVisionSupport(t *testing.T) {
 			name:      "supported with limits",
 			supported: true,
 			limits: &copilot.ModelVisionLimits{
-				MaxPromptImages:    3,
-				MaxPromptImageSize: 5 * 1024 * 1024,
-				SupportedMediaTypes:  []string{"image/png", "image/jpeg"},
+				MaxPromptImages:     3,
+				MaxPromptImageSize:  5 * 1024 * 1024,
+				SupportedMediaTypes: []string{"image/png", "image/jpeg"},
 			},
 			want: "Yes (3 images, 5.0 MiB)",
 		},
@@ -1252,7 +1252,7 @@ func TestBuildUsageAPIPath(t *testing.T) {
 	t.Parallel()
 
 	got := buildUsageAPIPath("octocat", 2026, 6, 15, "copilot", "gpt-5", usageBillingAICredits)
-	want := "/users/octocat/settings/billing/ai_credit/usage?year=2026&month=6&day=15&product=copilot&model=gpt-5"
+	want := "/users/octocat/settings/billing/ai_credit/usage?day=15&model=gpt-5&month=6&product=copilot&year=2026"
 	if got != want {
 		t.Fatalf("buildUsageAPIPath(ai-credits) = %q, want %q", got, want)
 	}
@@ -1281,32 +1281,8 @@ func TestUsageQuantityColumnHeaders(t *testing.T) {
 func TestResolveUsageBillingMode(t *testing.T) {
 	t.Parallel()
 
-	premium := &usageResponse{UsageItems: []struct {
-		Product          string  `json:"product" yaml:"product"`
-		SKU              string  `json:"sku" yaml:"sku"`
-		Model            string  `json:"model" yaml:"model"`
-		UnitType         string  `json:"unitType" yaml:"unitType"`
-		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
-		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
-		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
-		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
-		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
-		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
-		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
-	}{{Model: "gpt-5"}}}
-	aiCredits := &usageResponse{UsageItems: []struct {
-		Product          string  `json:"product" yaml:"product"`
-		SKU              string  `json:"sku" yaml:"sku"`
-		Model            string  `json:"model" yaml:"model"`
-		UnitType         string  `json:"unitType" yaml:"unitType"`
-		PricePerUnit     float64 `json:"pricePerUnit" yaml:"pricePerUnit"`
-		GrossQuantity    float64 `json:"grossQuantity" yaml:"grossQuantity"`
-		GrossAmount      float64 `json:"grossAmount" yaml:"grossAmount"`
-		DiscountQuantity float64 `json:"discountQuantity" yaml:"discountQuantity"`
-		DiscountAmount   float64 `json:"discountAmount" yaml:"discountAmount"`
-		NetQuantity      float64 `json:"netQuantity" yaml:"netQuantity"`
-		NetAmount        float64 `json:"netAmount" yaml:"netAmount"`
-	}{{UnitType: "ai-credits"}}}
+	premium := &usageResponse{UsageItems: []usageItem{{Model: "gpt-5"}}}
+	aiCredits := &usageResponse{UsageItems: []usageItem{{UnitType: "ai-credits"}}}
 	quota := &rpc.AccountGetQuotaResult{
 		QuotaSnapshots: map[string]rpc.AccountQuotaSnapshot{
 			"ai_credits": {EntitlementRequests: 20000},
