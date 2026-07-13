@@ -24,8 +24,14 @@ Provide a transparent view into Copilot's runtime state, including:
 - DuckDB SQL workflows for inspecting local session JSONL live in [.github/skills/duckdb-jsonl-inspection/](.github/skills/duckdb-jsonl-inspection/SKILL.md).
 
 ## Local verification
-- `go test ./...` and `go vet ./...` before submitting changes.
+- Run `go generate ./...` and verify that it leaves generated files unchanged.
+- Run `go test ./...`, `go vet ./...`, and `go build ./...` before submitting changes.
 - Install via `go install github.com/apstndb/copilot-show@latest` or `mise use -g go:github.com/apstndb/copilot-show@latest` (see README).
+
+## Release publication
+- Pushing a `v*` tag runs the release workflow, which verifies the source, builds assets, and creates a draft GitHub release.
+- Replace the draft body with reviewed per-version notes using `gh release edit <tag> --notes-file <file>`, then publish it with `gh release edit <tag> --draft=false`.
+- Verify the published release with `gh release view <tag>` and `GOPROXY=direct go list -m github.com/apstndb/copilot-show@<tag>`.
 
 ## Instructions for Agents
 - When modifying this project, maintain consistent table layouts using `render.CreateTable` (pkg/render).

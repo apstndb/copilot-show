@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -87,6 +89,255 @@ func TestResolveVersion(t *testing.T) {
 			got := resolveVersion(tc.explicit, tc.info, tc.ok)
 			if got != tc.want {
 				t.Fatalf("resolveVersion(%q, %+v, %v) = %q, want %q", tc.explicit, tc.info, tc.ok, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCommandNeedsCopilotClient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path []string
+		want bool
+	}{
+		{name: "root", path: []string{}, want: false},
+		{name: "online command", path: []string{"models"}, want: true},
+		{name: "offline command", path: []string{"history"}, want: false},
+		{name: "help command", path: []string{"help"}, want: false},
+		{name: "completion child", path: []string{"completion", "zsh"}, want: false},
+		{name: "completion request", path: []string{cobra.ShellCompRequestCmd}, want: false},
+		{name: "completion request without descriptions", path: []string{cobra.ShellCompNoDescRequestCmd}, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := &cobra.Command{Use: "copilot-show"}
+			current := root
+			for _, name := range test.path {
+				child := &cobra.Command{Use: name}
+				current.AddCommand(child)
+				current = child
+			}
+			if got := commandNeedsCopilotClient(current); got != test.want {
+				t.Fatalf(
+					"commandNeedsCopilotClient(%q) = %v, want %v",
+					current.CommandPath(),
+					got,
+					test.want,
+				)
+			}
+		})
+	}
+}
+
+func TestCopilotClientStartupCobraLifecycle(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantStarts    int
+		wantQuotaRuns int
+	}{
+		{name: "root without arguments", args: []string{}, wantStarts: 0},
+		{name: "root version", args: []string{"--version"}, wantStarts: 0},
+		{name: "online command", args: []string{"quota"}, wantStarts: 1, wantQuotaRuns: 1},
+		{name: "online command help", args: []string{"quota", "--help"}, wantStarts: 0},
+		{name: "online command explicit false help", args: []string{"quota", "--help=false"}, wantStarts: 1, wantQuotaRuns: 1},
+		{name: "help command", args: []string{"help", "quota"}, wantStarts: 0},
+		{name: "completion command", args: []string{"completion", "zsh"}, wantStarts: 0},
+		{name: "completion request", args: []string{cobra.ShellCompRequestCmd, "quota", ""}, wantStarts: 0},
+		{name: "completion request without descriptions", args: []string{cobra.ShellCompNoDescRequestCmd, "quota", ""}, wantStarts: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			starts := 0
+			quotaRuns := 0
+
+			copilotClientStartMu.Lock()
+			originalStart := startCopilotClient
+			originalStarted := copilotClientStarted
+			originalStartErr := copilotClientStartErr
+			startCopilotClient = func(context.Context, *copilot.Client) error {
+				starts++
+				return nil
+			}
+			copilotClientStarted = false
+			copilotClientStartErr = nil
+			copilotClientStartMu.Unlock()
+			t.Cleanup(func() {
+				copilotClientStartMu.Lock()
+				defer copilotClientStartMu.Unlock()
+				startCopilotClient = originalStart
+				copilotClientStarted = originalStarted
+				copilotClientStartErr = originalStartErr
+			})
+
+			root := &cobra.Command{
+				Use:           "copilot-show",
+				Version:       "test",
+				SilenceErrors: true,
+				SilenceUsage:  true,
+				PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+					if !commandNeedsCopilotClient(cmd) {
+						return nil
+					}
+					return ensureCopilotClient(cmd.Context(), nil)
+				},
+				Run: func(*cobra.Command, []string) {},
+			}
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			root.SetArgs(test.args)
+			root.AddCommand(&cobra.Command{
+				Use: "quota",
+				Run: func(*cobra.Command, []string) {
+					quotaRuns++
+				},
+			})
+
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute(%q) error = %v", test.args, err)
+			}
+			if starts != test.wantStarts {
+				t.Errorf("Execute(%q) starts = %d, want %d", test.args, starts, test.wantStarts)
+			}
+			if quotaRuns != test.wantQuotaRuns {
+				t.Errorf("Execute(%q) quota runs = %d, want %d", test.args, quotaRuns, test.wantQuotaRuns)
+			}
+		})
+	}
+}
+
+func TestUsageCommandRejectsInvalidEnumValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "billing",
+			args:    []string{"--billing", "invalid"},
+			wantErr: "invalid --billing",
+		},
+		{
+			name:    "sort order",
+			args:    []string{"--sort-order", "sideways"},
+			wantErr: "invalid --sort-order",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := newUsageCmd(nil)
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(test.args)
+
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("Execute(%q) error = nil, want error", test.args)
+			}
+			if !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("Execute(%q) error = %q, want substring %q", test.args, err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestResolveOfflineSessionID(t *testing.T) {
+	baseTime := time.Date(
+		2026,
+		7,
+		13,
+		0,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+	tests := []struct {
+		name     string
+		args     []string
+		sessions map[string]time.Time
+		want     string
+		wantErr  bool
+	}{
+		{
+			name: "newest local log wins when omitted",
+			args: []string{},
+			sessions: map[string]time.Time{
+				"foreground-session":   baseTime,
+				"newest-local-session": baseTime.Add(time.Hour),
+			},
+			want: "newest-local-session",
+		},
+		{
+			name: "explicit ID wins over newer local log",
+			args: []string{"foreground-session"},
+			sessions: map[string]time.Time{
+				"foreground-session":   baseTime,
+				"newest-local-session": baseTime.Add(time.Hour),
+			},
+			want: "foreground-session",
+		},
+		{
+			name:     "no local session",
+			args:     []string{},
+			sessions: map[string]time.Time{},
+			wantErr:  true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			for sessionID, modifiedAt := range test.sessions {
+				eventsPath := filepath.Join(
+					home,
+					".copilot",
+					"session-state",
+					sessionID,
+					"events.jsonl",
+				)
+				if err := os.MkdirAll(filepath.Dir(eventsPath), 0o755); err != nil {
+					t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(eventsPath), err)
+				}
+				if err := os.WriteFile(eventsPath, nil, 0o644); err != nil {
+					t.Fatalf("WriteFile(%q) error = %v", eventsPath, err)
+				}
+				if err := os.Chtimes(eventsPath, modifiedAt, modifiedAt); err != nil {
+					t.Fatalf("Chtimes(%q) error = %v", eventsPath, err)
+				}
+			}
+
+			got, err := resolveOfflineSessionID(test.args)
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("resolveOfflineSessionID(%q) error = nil, want error", test.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveOfflineSessionID(%q) error = %v", test.args, err)
+			}
+			if got != test.want {
+				t.Fatalf(
+					"resolveOfflineSessionID(%q) = %q, want %q",
+					test.args,
+					got,
+					test.want,
+				)
 			}
 		})
 	}
@@ -720,17 +971,23 @@ func TestDescribeHistoryEventSessionRemoteSteerableChanged(t *testing.T) {
 func TestIsKnownSDKSessionEventType(t *testing.T) {
 	t.Parallel()
 
-	if !isKnownSDKSessionEventType(copilot.SessionEventTypeUserMessage) {
-		t.Fatal("isKnownSDKSessionEventType(user.message) = false, want true")
+	knownTypes := []copilot.SessionEventType{
+		copilot.SessionEventTypeUserMessage,
+		copilot.SessionEventTypeSamplingRequested,
+		copilot.SessionEventTypeAssistantMessageStart,
+		copilot.SessionEventTypeSessionTodosChanged,
+		copilot.SessionEventTypeAssistantIdle,
+		copilot.SessionEventTypeMCPHeadersRefreshCompleted,
+		copilot.SessionEventTypeMCPHeadersRefreshRequired,
+		copilot.SessionEventTypeSessionLimitsExhaustedCompleted,
+		copilot.SessionEventTypeSessionLimitsExhaustedRequested,
+		copilot.SessionEventTypeSessionSessionLimitsChanged,
+		copilot.SessionEventTypeSessionUsageCheckpoint,
 	}
-	if !isKnownSDKSessionEventType(copilot.SessionEventTypeSamplingRequested) {
-		t.Fatal("isKnownSDKSessionEventType(sampling.requested) = false, want true")
-	}
-	if !isKnownSDKSessionEventType(copilot.SessionEventTypeAssistantMessageStart) {
-		t.Fatal("isKnownSDKSessionEventType(assistant.message_start) = false, want true")
-	}
-	if !isKnownSDKSessionEventType(copilot.SessionEventTypeSessionTodosChanged) {
-		t.Fatal("isKnownSDKSessionEventType(session.todos_changed) = false, want true")
+	for _, eventType := range knownTypes {
+		if !isKnownSDKSessionEventType(eventType) {
+			t.Fatalf("isKnownSDKSessionEventType(%q) = false, want true", eventType)
+		}
 	}
 	if isKnownSDKSessionEventType(copilot.SessionEventType("session.future_notice")) {
 		t.Fatal("isKnownSDKSessionEventType(session.future_notice) = true, want false")

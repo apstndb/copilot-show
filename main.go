@@ -83,6 +83,9 @@ var (
 	copilotClientStarted  bool
 	copilotClientStartMu  sync.Mutex
 	copilotClientStartErr error
+	startCopilotClient    = func(ctx context.Context, client *copilot.Client) error {
+		return client.Start(ctx)
+	}
 )
 
 func cliVersion() string {
@@ -243,7 +246,7 @@ func main() {
 			}
 			render.SetTableWidthOverride(tableWidth)
 			render.SetTableFoldEnabled(uiVersion == uiVersionNew || wrapLongText)
-			if wantsHelpOrVersion(cmd) || !commandNeedsCopilotClient(cmd) {
+			if !commandNeedsCopilotClient(cmd) {
 				return nil
 			}
 			return ensureCopilotClient(ctx, client)
@@ -320,8 +323,8 @@ func ensureCopilotClient(ctx context.Context, client *copilot.Client) error {
 	if copilotClientStarted {
 		return copilotClientStartErr
 	}
-	copilotClientStartErr = client.Start(ctx)
-	copilotClientStarted = true
+	copilotClientStartErr = startCopilotClient(ctx, client)
+	copilotClientStarted = copilotClientStartErr == nil
 	return copilotClientStartErr
 }
 
@@ -329,28 +332,19 @@ func commandNeedsCopilotClient(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return false
 	}
-	if cmd.Name() == "copilot-show" {
+	if cmd == cmd.Root() {
 		return false
 	}
-	_, offline := offlineCommands[cmd.Name()]
-	return !offline
-}
-
-func wantsHelpOrVersion(cmd *cobra.Command) bool {
-	if cmd == nil {
-		return false
-	}
-	for current := cmd; current != nil; current = current.Parent() {
-		if flag := current.Flags().Lookup("help"); flag != nil && flag.Changed {
-			return true
+	for current := cmd; current != nil && current != cmd.Root(); current = current.Parent() {
+		switch current.Name() {
+		case "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+			return false
+		}
+		if _, offline := offlineCommands[current.Name()]; offline {
+			return false
 		}
 	}
-	if cmd.Version != "" {
-		if flag := cmd.Flags().Lookup("version"); flag != nil && flag.Changed {
-			return true
-		}
-	}
-	return false
+	return true
 }
 
 func printYAML(v any) error {
@@ -2917,6 +2911,16 @@ func resolveSessionID(ctx context.Context, client *copilot.Client, args []string
 	return "", fmt.Errorf("no session ID provided and no foreground/last session found")
 }
 
+func resolveOfflineSessionID(args []string) (string, error) {
+	if len(args) > 0 {
+		return args[0], nil
+	}
+	if sessionID, ok := resolveLocalSessionID(); ok {
+		return sessionID, nil
+	}
+	return "", fmt.Errorf("no session ID provided and no local session found")
+}
+
 func resolveLocalSessionID() (string, bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -3003,7 +3007,7 @@ func newHistoryCmd(client *copilot.Client) *cobra.Command {
 				log.Printf("invalid --group-by %q: expected %q or %q", historyGroupBy, historyGroupByNone, historyGroupByTurn)
 				return
 			}
-			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			sessionID, err := resolveOfflineSessionID(args)
 			if err != nil {
 				log.Printf("%v", err)
 				return
@@ -3032,7 +3036,7 @@ func newGraphCmd(client *copilot.Client) *cobra.Command {
 		Short: "Show graph-oriented event summary for a session",
 		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			sessionID, err := resolveOfflineSessionID(args)
 			if err != nil {
 				log.Printf("%v", err)
 				return
@@ -3048,7 +3052,7 @@ func newResumeBranchesCmd(client *copilot.Client) *cobra.Command {
 		Short: "Trace inferred work branches that start from session.resume",
 		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			sessionID, err := resolveOfflineSessionID(args)
 			if err != nil {
 				log.Printf("%v", err)
 				return
@@ -3069,7 +3073,7 @@ func newValidateEventsCmd(client *copilot.Client) *cobra.Command {
 				log.Printf("invalid --samples %d: expected >= 0", sampleLimit)
 				return
 			}
-			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			sessionID, err := resolveOfflineSessionID(args)
 			if err != nil {
 				log.Printf("%v", err)
 				return
@@ -3088,7 +3092,7 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Show detailed billing usage from GitHub API",
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			now := time.Now().UTC()
 			// Flag parsing logic for drill down
 			// If finer grain is specified but coarser is not, use current values
@@ -3139,15 +3143,14 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 
 			mode, err := parseUsageBillingMode(billing)
 			if err != nil {
-				log.Print(err)
-				return
+				return err
 			}
 			resolvedSortOrder, err := parseUsageSortOrder(sortOrder)
 			if err != nil {
-				log.Print(err)
-				return
+				return err
 			}
 			showUsage(cmd.Context(), client, outputFormat, year, month, day, product, model, last, resolvedSortOrder, mode, withPricing)
+			return nil
 		},
 	}
 	cmd.Flags().IntVarP(&year, "year", "y", 0, "Year for usage report (positive for absolute, negative for relative)")
@@ -3859,106 +3862,6 @@ type sessionEventValidationRowRef struct {
 	ID        string
 	Type      string
 	Timestamp time.Time
-}
-
-// Mirrors the generated SessionEventType constants (copilot-sdk v1.0.5) so
-// validator output can tell whether a row uses a type known to the current SDK.
-var knownSDKSessionEventTypes = map[copilot.SessionEventType]struct{}{
-	copilot.SessionEventTypeAbort:                              {},
-	copilot.SessionEventTypeAssistantIntent:                    {},
-	copilot.SessionEventTypeAssistantMessage:                   {},
-	copilot.SessionEventTypeAssistantMessageDelta:              {},
-	copilot.SessionEventTypeAssistantMessageStart:              {},
-	copilot.SessionEventTypeAssistantReasoning:                 {},
-	copilot.SessionEventTypeAssistantReasoningDelta:            {},
-	copilot.SessionEventTypeAssistantStreamingDelta:            {},
-	copilot.SessionEventTypeAssistantTurnEnd:                   {},
-	copilot.SessionEventTypeAssistantTurnStart:                 {},
-	copilot.SessionEventTypeAssistantUsage:                     {},
-	copilot.SessionEventTypeAutoModeSwitchCompleted:            {},
-	copilot.SessionEventTypeAutoModeSwitchRequested:            {},
-	copilot.SessionEventTypeCapabilitiesChanged:                {},
-	copilot.SessionEventTypeCommandCompleted:                   {},
-	copilot.SessionEventTypeCommandExecute:                     {},
-	copilot.SessionEventTypeCommandQueued:                      {},
-	copilot.SessionEventTypeCommandsChanged:                    {},
-	copilot.SessionEventTypeElicitationCompleted:               {},
-	copilot.SessionEventTypeElicitationRequested:               {},
-	copilot.SessionEventTypeExitPlanModeCompleted:              {},
-	copilot.SessionEventTypeExitPlanModeRequested:              {},
-	copilot.SessionEventTypeExternalToolCompleted:              {},
-	copilot.SessionEventTypeExternalToolRequested:              {},
-	copilot.SessionEventTypeHookEnd:                            {},
-	copilot.SessionEventTypeHookProgress:                       {},
-	copilot.SessionEventTypeHookStart:                          {},
-	copilot.SessionEventTypeMCPAppToolCallComplete:             {},
-	copilot.SessionEventTypeMCPOauthCompleted:                  {},
-	copilot.SessionEventTypeMCPOauthRequired:                   {},
-	copilot.SessionEventTypeModelCallFailure:                   {},
-	copilot.SessionEventTypePendingMessagesModified:            {},
-	copilot.SessionEventTypePermissionCompleted:                {},
-	copilot.SessionEventTypePermissionRequested:                {},
-	copilot.SessionEventTypeSamplingCompleted:                  {},
-	copilot.SessionEventTypeSamplingRequested:                  {},
-	copilot.SessionEventTypeSessionAutopilotObjectiveChanged:   {},
-	copilot.SessionEventTypeSessionBackgroundTasksChanged:      {},
-	copilot.SessionEventTypeSessionBinaryAsset:                 {},
-	copilot.SessionEventTypeSessionCanvasClosed:                {},
-	copilot.SessionEventTypeSessionCanvasOpened:                {},
-	copilot.SessionEventTypeSessionCanvasRecorded:              {},
-	copilot.SessionEventTypeSessionCanvasRegistryChanged:       {},
-	copilot.SessionEventTypeSessionCanvasRemoved:               {},
-	copilot.SessionEventTypeSessionCanvasUnavailable:           {},
-	copilot.SessionEventTypeSessionCompactionComplete:          {},
-	copilot.SessionEventTypeSessionCompactionStart:             {},
-	copilot.SessionEventTypeSessionContextChanged:              {},
-	copilot.SessionEventTypeSessionCustomAgentsUpdated:         {},
-	copilot.SessionEventTypeSessionCustomNotification:          {},
-	copilot.SessionEventTypeSessionError:                       {},
-	copilot.SessionEventTypeSessionExtensionsAttachmentsPushed: {},
-	copilot.SessionEventTypeSessionExtensionsLoaded:            {},
-	copilot.SessionEventTypeSessionHandoff:                     {},
-	copilot.SessionEventTypeSessionIdle:                        {},
-	copilot.SessionEventTypeSessionInfo:                        {},
-	copilot.SessionEventTypeSessionMCPServerStatusChanged:      {},
-	copilot.SessionEventTypeSessionMCPServersLoaded:            {},
-	copilot.SessionEventTypeSessionModeChanged:                 {},
-	copilot.SessionEventTypeSessionModelChange:                 {},
-	copilot.SessionEventTypeSessionPermissionsChanged:          {},
-	copilot.SessionEventTypeSessionPlanChanged:                 {},
-	copilot.SessionEventTypeSessionRemoteSteerableChanged:      {},
-	copilot.SessionEventTypeSessionResume:                      {},
-	copilot.SessionEventTypeSessionScheduleCancelled:           {},
-	copilot.SessionEventTypeSessionScheduleCreated:             {},
-	copilot.SessionEventTypeSessionScheduleRearmed:             {},
-	copilot.SessionEventTypeSessionShutdown:                    {},
-	copilot.SessionEventTypeSessionSkillsLoaded:                {},
-	copilot.SessionEventTypeSessionSnapshotRewind:              {},
-	copilot.SessionEventTypeSessionStart:                       {},
-	copilot.SessionEventTypeSessionTaskComplete:                {},
-	copilot.SessionEventTypeSessionTitleChanged:                {},
-	copilot.SessionEventTypeSessionTodosChanged:                {},
-	copilot.SessionEventTypeSessionToolsUpdated:                {},
-	copilot.SessionEventTypeSessionTruncation:                  {},
-	copilot.SessionEventTypeSessionUsageInfo:                   {},
-	copilot.SessionEventTypeSessionWarning:                     {},
-	copilot.SessionEventTypeSessionWorkspaceFileChanged:        {},
-	copilot.SessionEventTypeSkillInvoked:                       {},
-	copilot.SessionEventTypeSubagentCompleted:                  {},
-	copilot.SessionEventTypeSubagentDeselected:                 {},
-	copilot.SessionEventTypeSubagentFailed:                     {},
-	copilot.SessionEventTypeSubagentSelected:                   {},
-	copilot.SessionEventTypeSubagentStarted:                    {},
-	copilot.SessionEventTypeSystemMessage:                      {},
-	copilot.SessionEventTypeSystemNotification:                 {},
-	copilot.SessionEventTypeToolExecutionComplete:              {},
-	copilot.SessionEventTypeToolExecutionPartialResult:         {},
-	copilot.SessionEventTypeToolExecutionProgress:              {},
-	copilot.SessionEventTypeToolExecutionStart:                 {},
-	copilot.SessionEventTypeToolUserRequested:                  {},
-	copilot.SessionEventTypeUserInputCompleted:                 {},
-	copilot.SessionEventTypeUserInputRequested:                 {},
-	copilot.SessionEventTypeUserMessage:                        {},
 }
 
 type interactionHubAccumulator struct {
@@ -7226,13 +7129,13 @@ func showTurnsV2(sessionID string, format string) {
 	fmt.Println("- 'State' is derived from local turn_end and abort events, so active sessions can show Open turns.")
 }
 
-func newTurnsCmd(client *copilot.Client) *cobra.Command {
+func newTurnsCmd(_ *copilot.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "turns [sessionID]",
 		Short: "Show turn-by-turn usage statistics for a session",
 		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			sessionID, err := resolveSessionID(cmd.Context(), client, args)
+			sessionID, err := resolveOfflineSessionID(args)
 			if err != nil {
 				log.Printf("%v", err)
 				return

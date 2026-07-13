@@ -28,6 +28,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check generated files
+        run: |
+          go generate ./...
+          git diff --exit-code -- known_sdk_session_event_types_generated.go
+
       - name: Check gofmt
         run: |
           unformatted=$(gofmt -l $(git ls-files '*.go'))
