@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -207,6 +209,85 @@ func TestCopilotClientStartupCobraLifecycle(t *testing.T) {
 			}
 			if quotaRuns != test.wantQuotaRuns {
 				t.Errorf("Execute(%q) quota runs = %d, want %d", test.args, quotaRuns, test.wantQuotaRuns)
+			}
+		})
+	}
+}
+
+func TestExecuteWithCopilotClientCleanup(t *testing.T) {
+	executeErr := errors.New("execute error")
+	stopErr := errors.New("stop error")
+	tests := []struct {
+		name       string
+		started    bool
+		executeErr error
+		stopErr    error
+		wantStops  int
+	}{
+		{
+			name:       "not started",
+			started:    false,
+			executeErr: executeErr,
+			wantStops:  0,
+		},
+		{
+			name:       "execute error",
+			started:    true,
+			executeErr: executeErr,
+			wantStops:  1,
+		},
+		{
+			name:      "stop error after success",
+			started:   true,
+			stopErr:   stopErr,
+			wantStops: 1,
+		},
+		{
+			name:       "execute and stop errors",
+			started:    true,
+			executeErr: executeErr,
+			stopErr:    stopErr,
+			wantStops:  1,
+		},
+	}
+
+	originalLogWriter := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() {
+		log.SetOutput(originalLogWriter)
+	})
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stops := 0
+
+			copilotClientStartMu.Lock()
+			originalStop := stopCopilotClient
+			originalStarted := copilotClientStarted
+			stopCopilotClient = func(*copilot.Client) error {
+				stops++
+				return test.stopErr
+			}
+			copilotClientStarted = test.started
+			copilotClientStartMu.Unlock()
+			t.Cleanup(func() {
+				copilotClientStartMu.Lock()
+				defer copilotClientStartMu.Unlock()
+				stopCopilotClient = originalStop
+				copilotClientStarted = originalStarted
+			})
+
+			gotErr := executeWithCopilotClientCleanup(nil, func() error {
+				return test.executeErr
+			})
+			if !errors.Is(gotErr, test.executeErr) {
+				t.Errorf("executeWithCopilotClientCleanup() error = %v, want %v", gotErr, test.executeErr)
+			}
+			if test.stopErr != nil && errors.Is(gotErr, test.stopErr) {
+				t.Errorf("executeWithCopilotClientCleanup() error includes stop error %v", test.stopErr)
+			}
+			if stops != test.wantStops {
+				t.Errorf("executeWithCopilotClientCleanup() stops = %d, want %d", stops, test.wantStops)
 			}
 		})
 	}

@@ -86,6 +86,9 @@ var (
 	startCopilotClient    = func(ctx context.Context, client *copilot.Client) error {
 		return client.Start(ctx)
 	}
+	stopCopilotClient = func(client *copilot.Client) error {
+		return client.Stop()
+	}
 )
 
 func cliVersion() string {
@@ -214,14 +217,6 @@ func configureShowHiddenHelp(root *cobra.Command, showHidden *bool) {
 func main() {
 	client := copilot.NewClient(nil)
 	ctx := context.Background()
-	defer func() {
-		copilotClientStartMu.Lock()
-		started := copilotClientStarted
-		copilotClientStartMu.Unlock()
-		if started {
-			client.Stop()
-		}
-	}()
 
 	var showHiddenHelp bool
 	rootCmd := &cobra.Command{
@@ -311,10 +306,28 @@ func main() {
 	}
 	configureShowHiddenHelp(rootCmd, &showHiddenHelp)
 
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
+	if err := executeWithCopilotClientCleanup(client, func() error {
+		return rootCmd.ExecuteContext(ctx)
+	}); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func executeWithCopilotClientCleanup(client *copilot.Client, execute func() error) (err error) {
+	defer func() {
+		copilotClientStartMu.Lock()
+		started := copilotClientStarted
+		stop := stopCopilotClient
+		copilotClientStartMu.Unlock()
+		if !started {
+			return
+		}
+		if stopErr := stop(client); stopErr != nil {
+			log.Printf("warning: failed to stop Copilot client: %v", stopErr)
+		}
+	}()
+	return execute()
 }
 
 func ensureCopilotClient(ctx context.Context, client *copilot.Client) error {
