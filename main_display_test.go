@@ -27,13 +27,24 @@ func TestFormatCompactCountSummary(t *testing.T) {
 func TestFormatQuotaMetricName(t *testing.T) {
 	t.Parallel()
 
-	if got := formatQuotaMetricName("premium_interactions"); got != "Premium Interactions" {
-		t.Fatalf("formatQuotaMetricName(premium_interactions) = %q", got)
+	tokenBased := true
+	requestBased := false
+	if got := formatQuotaMetricName("premium_interactions", &tokenBased); got != "AI Credits" {
+		t.Fatalf("formatQuotaMetricName(token billing) = %q", got)
 	}
-	if got := formatQuotaMetricName("ai_credits"); got != "AI Credits" {
+	if got := formatQuotaMetricName("premium_interactions", &requestBased); got != "Premium Interactions" {
+		t.Fatalf("formatQuotaMetricName(request billing) = %q", got)
+	}
+	if got := formatQuotaMetricName("premium_interactions", nil); got != "AI Credits" {
+		t.Fatalf("formatQuotaMetricName(unknown billing) = %q", got)
+	}
+	if got := formatLegacyQuotaMetricName("premium_interactions"); got != "Premium Interactions" {
+		t.Fatalf("formatLegacyQuotaMetricName(premium_interactions) = %q", got)
+	}
+	if got := formatQuotaMetricName("ai_credits", &tokenBased); got != "AI Credits" {
 		t.Fatalf("formatQuotaMetricName(ai_credits) = %q", got)
 	}
-	if got := formatQuotaMetricName("chat_completions"); got != "Chat Completions" {
+	if got := formatQuotaMetricName("chat_completions", &tokenBased); got != "Chat Completions" {
 		t.Fatalf("formatQuotaMetricName(chat_completions) = %q", got)
 	}
 }
@@ -126,8 +137,25 @@ func TestSortStatsModelsPrefersHigherPremiumRequests(t *testing.T) {
 		"gpt-5.4-mini": {Cost: 10, Requests: 50},
 	}
 	models := []string{"claude-opus", "gpt-5.4-mini", "gpt-5.4"}
-	sortStatsModels(models, stats)
+	sortStatsModels(models, stats, false)
 	if models[0] != "gpt-5.4" || models[1] != "gpt-5.4-mini" || models[2] != "claude-opus" {
+		t.Fatalf("sortStatsModels() = %#v", models)
+	}
+}
+
+func TestSortStatsModelsPrefersRecordedAICredits(t *testing.T) {
+	t.Parallel()
+
+	lowCredits := 1_000_000_000.0
+	highCredits := 2_000_000_000.0
+	stats := map[string]*analyze.ModelStat{
+		"legacy": {Cost: 10, Requests: 100},
+		"low":    {TotalNanoAiu: &lowCredits, Cost: 5, Requests: 50},
+		"high":   {TotalNanoAiu: &highCredits, Cost: 1, Requests: 10},
+	}
+	models := []string{"legacy", "low", "high"}
+	sortStatsModels(models, stats, true)
+	if models[0] != "high" || models[1] != "low" || models[2] != "legacy" {
 		t.Fatalf("sortStatsModels() = %#v", models)
 	}
 }

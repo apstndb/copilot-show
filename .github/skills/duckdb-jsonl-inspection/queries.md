@@ -62,10 +62,11 @@ For the full query text, see the individual `.sql` files in `queries/`.
 | 21 | Authenticated HTTP GET with httpfs and CREATE SECRET | Read JSON APIs with bearer-token auth via `httpfs` | [queries/21-httpfs-authenticated-get.sql](queries/21-httpfs-authenticated-get.sql) |
 | 22 | Explicit HTTP request/response with the optional http_client extension | Full response object with status and body via `http_client` | [queries/22-http-client-explicit-request.sql](queries/22-http-client-explicit-request.sql) |
 
-## Session analysis (23–25)
+## Session analysis (23–26)
 
 | # | Name | Description | File |
 |---|------|-------------|------|
 | 23 | Reconstruct turn windows for turns/history analysis | Pair `turn_start`/`turn_end` by occurrence and assign tools by time window | [queries/23-reconstruct-turn-windows.sql](queries/23-reconstruct-turn-windows.sql) |
 | 24 | Prototype a property graph with DuckPGQ | Build event/interaction/tool-call vertices and edges with DuckPGQ | [queries/24-duckpgq-property-graph.sql](queries/24-duckpgq-property-graph.sql) |
 | 25 | Reconstruct billable user-message windows and weighted premium requests | Reconcile shutdown `totalPremiumRequests` to per-window model weights | [queries/25-billable-user-message-windows.sql](queries/25-billable-user-message-windows.sql) |
+| 26 | Summarize shutdown Local AI Units | Compare the latest optional top-level and per-model `totalNanoAiu` session snapshots by UTC month | [queries/26-shutdown-local-ai-unit-summary.sql](queries/26-shutdown-local-ai-unit-summary.sql) |

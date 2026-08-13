@@ -1,4 +1,18 @@
-# Premium request billing model
+# Local AI-unit and historical premium-request metrics
+
+## Nano-AIU in shutdown metrics
+
+Newer SDK session logs can record experimental metering as nano-AI units in both `session.shutdown.data.totalNanoAiu` and `session.shutdown.data.modelMetrics.*.totalNanoAiu`. For readable local output, `copilot-show` normalizes 1,000,000,000 nano-AIU to one **Local AI Unit**. Neither the SDK contract nor GitHub billing documentation establishes that this local unit equals one billed AI Credit.
+
+These fields can be absent from older sessions. Absence must remain distinct from an explicit zero. The SDK describes shutdown `totalNanoAiu` as a session-wide accumulated value, so a resumed session can emit multiple snapshots of the same cumulative meter. `stats` therefore keeps the latest selected shutdown snapshot for each session and then sums those per-session values. Its current-month filter selects that snapshot by shutdown time; a session-wide value can include activity from before the selected month. Historical premium-request fields are handled separately because inspected local logs show that those values can reset at resume boundaries.
+
+In the inspected local corpus, every shutdown row that had a top-level nano-AIU value also had model values whose sum matched it exactly. The default `stats` table deliberately uses the model sum so its headline matches the displayed rows, retains both aggregates in YAML, and warns if they differ.
+
+Local shutdown metrics are useful for attributing completed-session activity to models. They are not the billing source of truth: `copilot-show usage` reads the GitHub user billing endpoint for usage billed directly to the personal account. That endpoint excludes Copilot usage managed and billed through an organization or enterprise. Current-session tails also do not contribute `totalNanoAiu` until a shutdown metric is written.
+
+Use `.github/skills/duckdb-jsonl-inspection/queries/26-shutdown-local-ai-unit-summary.sql` to compare top-level and per-model values without reading message content.
+
+## Historical premium-request model
 
 `copilot-show` should treat `session.shutdown` as the authoritative source for closed-segment billing.
 
@@ -103,9 +117,9 @@ The research ruled out several tempting shortcuts:
 
 ## Implications for `copilot-show`
 
-This supports the current `stats` strategy:
+This supports the historical compatibility view in `stats`:
 
-- if a session has `session.shutdown`, trust `totalPremiumRequests` and `modelMetrics.requests.{count,cost}`,
+- if a session has `session.shutdown`, trust `totalPremiumRequests` and `modelMetrics.requests.{count,cost}` for legacy premium-request analysis,
 - if a session is still active and no shutdown exists yet, treat any estimate as heuristic.
 
 The current fallback for active sessions is still intentionally crude.

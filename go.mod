@@ -3,7 +3,7 @@ module github.com/apstndb/copilot-show
 go 1.26.1
 
 require (
-	github.com/github/copilot-sdk/go v1.0.5
+	github.com/github/copilot-sdk/go v1.0.9
 	github.com/goccy/go-yaml v1.19.2
 	github.com/maruel/natural v1.3.0
 	github.com/olekukonko/tablewriter v1.1.4
@@ -17,6 +17,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.10.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.6.0 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
+	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

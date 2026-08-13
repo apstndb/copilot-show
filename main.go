@@ -53,8 +53,9 @@ const (
 	usageBillingAICredits      = "ai-credits"
 	usageBillingAuto           = "auto"
 
-	// One AI credit equals 10^9 nano-AI units in Copilot SDK metering.
-	nanoAiuPerCredit = 1_000_000_000.0
+	// One local AI unit is 10^9 nano-AI units. The SDK does not document these
+	// experimental metering units as GitHub billing AI Credits.
+	nanoAiuPerAIUnit = 1_000_000_000.0
 )
 
 var (
@@ -436,7 +437,7 @@ func withResumedSession(ctx context.Context, client *copilot.Client, sessionID s
 func newQuotaCmd(client *copilot.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "quota",
-		Short: "Show Premium Interactions quota",
+		Short: "Show AI Credits allowance and Copilot SDK quota signals",
 		Run: func(cmd *cobra.Command, args []string) {
 			showQuota(cmd.Context(), client, outputFormat)
 		},
@@ -454,16 +455,15 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 		emitYAML(quota)
 		return
 	}
+	var tokenBasedBilling *bool
+	if uiVersion == uiVersionNew {
+		tokenBasedBilling = currentTokenBasedBilling(ctx, client)
+	}
 
 	header := []string{"Metric", "Included", "Used", "Overage", "Usage %"}
 	table := render.CreateTable(header, []int{1, 2, 3, 4}, false, false, tableMode)
 
-	// Sort snapshots by name for consistent output
-	var keys []string
-	for k := range quota.QuotaSnapshots {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := quotaSnapshotKeys(quota)
 
 	lastUpdatedSet := make(map[string]struct{})
 	for _, k := range keys {
@@ -490,8 +490,12 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 			}
 		}
 
+		metricName := formatQuotaMetricName(k, tokenBasedBilling)
+		if uiVersion == uiVersionOld {
+			metricName = formatLegacyQuotaMetricName(k)
+		}
 		table.Append([]string{
-			formatQuotaMetricName(k),
+			metricName,
 			strconv.FormatInt(snap.EntitlementRequests, 10),
 			strconv.FormatInt(snap.UsedRequests, 10),
 			overageVal,
@@ -500,6 +504,12 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	}
 
 	if len(keys) == 0 {
+		if uiVersion == uiVersionNew {
+			fmt.Println("--- Quota Information ---")
+			fmt.Println("No quota information found.")
+			printCurrentQuotaNotes(tokenBasedBilling)
+			return
+		}
 		fmt.Println("No quota information found.")
 		return
 	}
@@ -519,6 +529,11 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 		} else {
 			fmt.Printf("Last Updated: %v\n", dates)
 		}
+	}
+
+	if uiVersion == uiVersionNew {
+		printCurrentQuotaNotes(tokenBasedBilling)
+		return
 	}
 
 	// Add educational notes based on documentation
@@ -565,7 +580,55 @@ func showQuota(ctx context.Context, client *copilot.Client, format string) {
 	fmt.Println("- 'Overage' shows the extra usage after exhausting your included requests.")
 	fmt.Println("- Billing weights vary by model; session shutdown metrics preserve fractional premium-request totals.")
 	fmt.Println("- Live quota still reports premium_interactions from the Copilot SDK while GitHub rolls out AI credits on individual plans.")
-	fmt.Println("- `copilot-show usage` auto-detects premium-request vs AI-credits billing; use `--billing` to force a mode.")
+	fmt.Println("- `copilot-show usage` defaults to AI Credits; use the hidden `--billing premium-request` or `--billing auto` override for historical data.")
+}
+
+func quotaSnapshotKeys(quota *rpc.AccountGetQuotaResult) []string {
+	keys := make([]string, 0, len(quota.QuotaSnapshots))
+	for key := range quota.QuotaSnapshots {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func currentTokenBasedBilling(ctx context.Context, client *copilot.Client) *bool {
+	// GetQuota flattens quota snapshots and drops token_based_billing. The auth
+	// snapshot retains it, so use that flag to interpret premium_interactions.
+	currentAuth, err := client.RPC.Account.GetCurrentAuth(ctx)
+	if err != nil {
+		log.Printf("Warning: could not determine quota billing mode: %v", err)
+		return nil
+	}
+	if currentAuth == nil {
+		return nil
+	}
+	user := copilotUserFromAuth(currentAuth.AuthInfo)
+	return tokenBasedBillingFromUser(user)
+}
+
+func tokenBasedBillingFromUser(user *rpc.CopilotUserResponse) *bool {
+	if user == nil {
+		return nil
+	}
+	if user.TokenBasedBilling != nil {
+		return user.TokenBasedBilling
+	}
+	if user.QuotaSnapshots == nil || user.QuotaSnapshots.PremiumInteractions == nil {
+		return nil
+	}
+	return user.QuotaSnapshots.PremiumInteractions.TokenBasedBilling
+}
+
+func printCurrentQuotaNotes(tokenBasedBilling *bool) {
+	fmt.Println("\nNotes:")
+	if tokenBasedBilling == nil || *tokenBasedBilling {
+		fmt.Println("- 'AI Credits' is sourced from the Copilot SDK's legacy-named `premium_interactions` snapshot.")
+		fmt.Println("- 'Used' is the SDK's whole-credit value; `copilot-show usage` shows detailed fractional consumption.")
+	} else {
+		fmt.Println("- This account reports legacy request-based billing.")
+	}
+	fmt.Println("- Raw SDK field names remain available with `--format yaml`.")
 }
 
 func newModelsCmd(client *copilot.Client) *cobra.Command {
@@ -694,10 +757,18 @@ func buildRuntimeModelsSnapshot(models []copilot.ModelInfo, snapshot modeldocs.S
 	return result
 }
 
-func sortStatsModels(models []string, stats map[string]*analyze.ModelStat) {
+func sortStatsModels(models []string, stats map[string]*analyze.ModelStat, preferAICredits bool) {
 	sort.Slice(models, func(i, j int) bool {
 		left := stats[models[i]]
 		right := stats[models[j]]
+		if preferAICredits {
+			if (left.TotalNanoAiu != nil) != (right.TotalNanoAiu != nil) {
+				return left.TotalNanoAiu != nil
+			}
+			if left.TotalNanoAiu != nil && *left.TotalNanoAiu != *right.TotalNanoAiu {
+				return *left.TotalNanoAiu > *right.TotalNanoAiu
+			}
+		}
 		if left.Cost != right.Cost {
 			return left.Cost > right.Cost
 		}
@@ -2022,6 +2093,40 @@ func authInfoView(auth rpc.AuthInfo) accountAuthView {
 	return view
 }
 
+func copilotUserFromAuth(auth rpc.AuthInfo) *rpc.CopilotUserResponse {
+	switch info := auth.(type) {
+	case *rpc.GhCLIAuthInfo:
+		if info != nil {
+			return info.CopilotUser
+		}
+	case *rpc.CopilotAPITokenAuthInfo:
+		if info != nil {
+			return info.CopilotUser
+		}
+	case *rpc.EnvAuthInfo:
+		if info != nil {
+			return info.CopilotUser
+		}
+	case *rpc.APIKeyAuthInfo:
+		if info != nil {
+			return info.CopilotUser
+		}
+	case *rpc.HMACAuthInfo:
+		if info != nil {
+			return info.CopilotUser
+		}
+	case *rpc.TokenAuthInfo:
+		if info != nil {
+			return info.CopilotUser
+		}
+	case *rpc.UserAuthInfo:
+		if info != nil {
+			return info.CopilotUser
+		}
+	}
+	return nil
+}
+
 func copilotPlanFromUser(user *rpc.CopilotUserResponse) string {
 	if user == nil || user.CopilotPlan == nil {
 		return ""
@@ -2566,7 +2671,7 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 		summary.Append([]string{"Start Time", formatTimeRFC3339(metrics.SessionStartTime)})
 		summary.Append([]string{"User Requests", strconv.FormatInt(metrics.TotalUserRequests, 10)})
 		summary.Append([]string{"Premium Cost", render.FormatFloatCompact(metrics.TotalPremiumRequestCost)})
-		summary.Append([]string{"AI Credits (session)", formatOptionalCredits(metrics.TotalNanoAiu)})
+		summary.Append([]string{"Local AI Units (session)", formatOptionalAIUnits(metrics.TotalNanoAiu)})
 		summary.Append([]string{"API Duration", formatMilliseconds(float64(metrics.TotalAPIDurationMs))})
 		summary.Append([]string{"Last Call Input", strconv.FormatInt(metrics.LastCallInputTokens, 10)})
 		summary.Append([]string{"Last Call Output", strconv.FormatInt(metrics.LastCallOutputTokens, 10)})
@@ -2581,7 +2686,7 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 
 		fmt.Println()
 		table := render.CreateTable(
-			[]string{"Model", "Requests", "PR Cost", "AI Credits", "Input", "Cache Read", "Cache Write", "Output", "Reasoning"},
+			[]string{"Model", "Requests", "PR Cost", "Local AI Units", "Input", "Cache Read", "Cache Write", "Output", "Reasoning"},
 			[]int{1, 2, 3, 4, 5, 6, 7, 8},
 			false,
 			false,
@@ -2600,7 +2705,7 @@ func showSessionUsage(ctx context.Context, client *copilot.Client, sessionID str
 				modelID,
 				strconv.FormatInt(mm.Requests.Count, 10),
 				render.FormatFloatCompact(mm.Requests.Cost),
-				formatOptionalCredits(mm.TotalNanoAiu),
+				formatOptionalAIUnits(mm.TotalNanoAiu),
 				strconv.FormatInt(mm.Usage.InputTokens, 10),
 				strconv.FormatInt(mm.Usage.CacheReadTokens, 10),
 				strconv.FormatInt(mm.Usage.CacheWriteTokens, 10),
@@ -3104,7 +3209,7 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 	var withPricing bool
 	cmd := &cobra.Command{
 		Use:   "usage",
-		Short: "Show detailed billing usage from GitHub API",
+		Short: "Show detailed AI Credits billing usage from GitHub API",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			now := time.Now().UTC()
 			// Flag parsing logic for drill down
@@ -3175,7 +3280,8 @@ func newUsageCmd(client *copilot.Client) *cobra.Command {
 	cmd.Flags().StringVarP(&model, "model", "M", "", "Model to filter (e.g., gpt-5, claude-opus-4.6)")
 	cmd.Flags().MarkHidden("model")
 	cmd.Flags().StringVar(&sortOrder, "sort-order", "desc", "Sort order for Period (asc, desc)")
-	cmd.Flags().StringVar(&billing, "billing", usageBillingAuto, "Billing unit for the usage report (premium-request, ai-credits, auto)")
+	cmd.Flags().StringVar(&billing, "billing", usageBillingAICredits, "Billing unit for the usage report (ai-credits, premium-request, auto)")
+	cmd.Flags().MarkHidden("billing")
 	cmd.Flags().BoolVar(&withPricing, "with-pricing", false, "Join usage rows with live SDK model token pricing ($ I/O per M tokens)")
 	return cmd
 }
@@ -3198,10 +3304,10 @@ type usageReportOutput struct {
 
 func parseUsageBillingMode(raw string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", usageBillingPremiumRequest:
-		return usageBillingPremiumRequest, nil
-	case usageBillingAICredits:
+	case "", usageBillingAICredits:
 		return usageBillingAICredits, nil
+	case usageBillingPremiumRequest:
+		return usageBillingPremiumRequest, nil
 	case usageBillingAuto:
 		return usageBillingAuto, nil
 	default:
@@ -3260,7 +3366,7 @@ func usageIncludedLabel(billingMode string) string {
 	return "Monthly Included Premium Requests (current plan)"
 }
 
-func quotaIncludedLimit(quota *rpc.AccountGetQuotaResult, billingMode string) float64 {
+func quotaIncludedLimit(quota *rpc.AccountGetQuotaResult, billingMode string, tokenBasedBilling *bool) float64 {
 	if quota == nil {
 		return 0
 	}
@@ -3268,6 +3374,12 @@ func quotaIncludedLimit(quota *rpc.AccountGetQuotaResult, billingMode string) fl
 	case usageBillingAICredits:
 		for _, key := range []string{"ai_credits", "ai_credit", "ai-credits"} {
 			if snap, ok := quota.QuotaSnapshots[key]; ok && snap.EntitlementRequests > 0 {
+				return float64(snap.EntitlementRequests)
+			}
+		}
+		// Token-billed accounts currently retain the legacy SDK snapshot key.
+		if tokenBasedBilling == nil || *tokenBasedBilling {
+			if snap, ok := quota.QuotaSnapshots["premium_interactions"]; ok {
 				return float64(snap.EntitlementRequests)
 			}
 		}
@@ -3319,15 +3431,15 @@ func resolveUsageBillingMode(requested string, premium, aiCredits *usageResponse
 	return usageBillingPremiumRequest
 }
 
-func nanoAiuToCredits(nano float64) float64 {
-	return nano / nanoAiuPerCredit
+func nanoAiuToAIUnits(nano float64) float64 {
+	return nano / nanoAiuPerAIUnit
 }
 
-func formatOptionalCredits(nano *float64) string {
+func formatOptionalAIUnits(nano *float64) string {
 	if nano == nil {
 		return "-"
 	}
-	return strconv.FormatFloat(nanoAiuToCredits(*nano), 'f', -1, 64)
+	return strconv.FormatFloat(nanoAiuToAIUnits(*nano), 'f', -1, 64)
 }
 
 func parseUsageSortOrder(raw string) (string, error) {
@@ -3457,7 +3569,11 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	flatItems := flattenUsageResponses(responses)
 
 	// Fetch included limit if available (for reference only, as it's for current month)
-	entitlement := quotaIncludedLimit(quotaRes, resolvedBilling)
+	var tokenBasedBilling *bool
+	if resolvedBilling == usageBillingAICredits {
+		tokenBasedBilling = currentTokenBasedBilling(ctx, client)
+	}
+	entitlement := quotaIncludedLimit(quotaRes, resolvedBilling, tokenBasedBilling)
 
 	// Sort usage items: Period (sortOrder), SKU ASC, Model ASC
 	sort.Slice(flatItems, func(i, j int) bool {
@@ -3489,6 +3605,9 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 			fmt.Printf("%s: %s\n", usageIncludedLabel(resolvedBilling), strconv.FormatFloat(entitlement, 'f', -1, 64))
 		}
 		fmt.Println("No billable usage items found for the selected period.")
+		if resolvedBilling == usageBillingAICredits {
+			fmt.Println("This user endpoint excludes organization- or enterprise-managed Copilot usage.")
+		}
 		return
 	}
 
@@ -3560,6 +3679,7 @@ func showUsage(ctx context.Context, client *copilot.Client, format string, year,
 	fmt.Println("\nNotes:")
 	if resolvedBilling == usageBillingAICredits {
 		fmt.Println("- 'Used (credits)' is the total AI credits consumed.")
+		fmt.Println("- This user endpoint covers usage billed directly to the personal account; organization- or enterprise-managed Copilot usage is excluded.")
 	} else {
 		fmt.Println("- 'Used (req.)' is the total premium requests consumed.")
 		fmt.Println("- 'req.' stands for 'requests'.")
@@ -5027,9 +5147,12 @@ func truncateRunes(text string, limit int) string {
 	return string(runes[:limit]) + "..."
 }
 
-func formatQuotaMetricName(key string) string {
+func formatQuotaMetricName(key string, tokenBasedBilling *bool) string {
 	switch key {
 	case "premium_interactions":
+		if tokenBasedBilling == nil || *tokenBasedBilling {
+			return "AI Credits"
+		}
 		return "Premium Interactions"
 	case "ai_credits", "ai_credit", "ai-credits":
 		return "AI Credits"
@@ -5043,6 +5166,13 @@ func formatQuotaMetricName(key string) string {
 		}
 		return strings.Join(parts, " ")
 	}
+}
+
+func formatLegacyQuotaMetricName(key string) string {
+	if key == "premium_interactions" {
+		return "Premium Interactions"
+	}
+	return formatQuotaMetricName(key, nil)
 }
 
 func formatCompactCountSummary(counts map[string]int, maxItems int) string {
@@ -6142,6 +6272,85 @@ func addShutdownUsageTokens(stat *analyze.ModelStat, usage map[string]any) {
 	}
 }
 
+func addShutdownModelMetrics(stats map[string]*analyze.ModelStat, metrics map[string]any) {
+	for model, raw := range metrics {
+		metric, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := stats[model]; !ok {
+			stats[model] = &analyze.ModelStat{}
+		}
+		stat := stats[model]
+		if requests, ok := metric["requests"].(map[string]any); ok {
+			count, _ := requests["count"].(float64)
+			cost, _ := requests["cost"].(float64)
+			stat.Requests += int64(count)
+			stat.Cost += cost
+		}
+		if usage, ok := metric["usage"].(map[string]any); ok {
+			addShutdownUsageTokens(stat, usage)
+		}
+	}
+}
+
+// replaceShutdownModelNanoAiu records the latest session-wide SDK snapshot.
+// Requests and tokens are segment values and are accumulated separately, but
+// totalNanoAiu is documented by the SDK as accumulated for the session.
+func replaceShutdownModelNanoAiu(stats map[string]*analyze.ModelStat, metrics map[string]any) (float64, bool) {
+	for _, stat := range stats {
+		stat.TotalNanoAiu = nil
+	}
+	var total float64
+	hasTotal := false
+	for model, raw := range metrics {
+		metric, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		nanoAiu, ok := metric["totalNanoAiu"].(float64)
+		if !ok {
+			continue
+		}
+		if _, ok := stats[model]; !ok {
+			stats[model] = &analyze.ModelStat{}
+		}
+		value := nanoAiu
+		stats[model].TotalNanoAiu = &value
+		total += nanoAiu
+		hasTotal = true
+	}
+	return total, hasTotal
+}
+
+func mergeModelStats(dst, src map[string]*analyze.ModelStat) {
+	for model, source := range src {
+		if _, ok := dst[model]; !ok {
+			dst[model] = &analyze.ModelStat{}
+		}
+		target := dst[model]
+		target.Requests += source.Requests
+		target.Cost += source.Cost
+		target.Input += source.Input
+		target.CacheRead += source.CacheRead
+		target.CacheWrite += source.CacheWrite
+		target.Output += source.Output
+		for key, value := range source.ExtraUsageTokens {
+			target.AddExtraUsage(key, value)
+		}
+		if source.TotalNanoAiu != nil {
+			addOptionalFloat64(&target.TotalNanoAiu, *source.TotalNanoAiu)
+		}
+	}
+}
+
+func addOptionalFloat64(total **float64, value float64) {
+	if *total == nil {
+		*total = new(float64)
+	}
+	**total += value
+}
+
 type statsAPICostDisplayLine struct {
 	Kind     string
 	Tokens   string
@@ -7195,6 +7404,8 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 
 	stats := make(map[string]*analyze.ModelStat)
 	var totalPremiumRequests float64
+	var totalShutdownNanoAiu *float64
+	var totalModelNanoAiu *float64
 	var apiPricingOverrides *analyze.APIPricingOverrides
 	hasActiveAPIPricingOverrides := false
 	if apiPricingOverridePath != "" {
@@ -7223,6 +7434,8 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 			log.Printf("Error reading %s: %v", eventsPath, err)
 			continue
 		}
+		sessionStats := make(map[string]*analyze.ModelStat)
+		var sessionShutdownNanoAiu *float64
 		if err := visitJSONLObjects(eventsPath, func(ev map[string]any) error {
 			if !showAllHistory {
 				if ts, ok := parseSessionTimestamp(ev["timestamp"]); ok && ts.Before(startOfMonth) {
@@ -7240,24 +7453,18 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 				if total, ok := data["totalPremiumRequests"].(float64); ok {
 					totalPremiumRequests += total
 				}
+				eventNanoAiu, hasEventNanoAiu := data["totalNanoAiu"].(float64)
 				if metrics, ok := data["modelMetrics"].(map[string]any); ok {
-					for model, m := range metrics {
-						if mv, ok := m.(map[string]any); ok {
-							if _, ok := stats[model]; !ok {
-								stats[model] = &analyze.ModelStat{}
-							}
-							s := stats[model]
-							if reqs, ok := mv["requests"].(map[string]any); ok {
-								count, _ := reqs["count"].(float64)
-								cost, _ := reqs["cost"].(float64)
-								s.Requests += int64(count)
-								s.Cost += cost
-							}
-							if usage, ok := mv["usage"].(map[string]any); ok {
-								addShutdownUsageTokens(s, usage)
-							}
-						}
-					}
+					addShutdownModelMetrics(sessionStats, metrics)
+					replaceShutdownModelNanoAiu(sessionStats, metrics)
+				} else {
+					replaceShutdownModelNanoAiu(sessionStats, nil)
+				}
+				if hasEventNanoAiu {
+					value := eventNanoAiu
+					sessionShutdownNanoAiu = &value
+				} else {
+					sessionShutdownNanoAiu = nil
 				}
 			case copilot.SessionEventTypeToolExecutionComplete:
 				if hasShutdown {
@@ -7265,16 +7472,25 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 				}
 				model, _ := data["model"].(string)
 				if model != "" {
-					if _, ok := stats[model]; !ok {
-						stats[model] = &analyze.ModelStat{}
+					if _, ok := sessionStats[model]; !ok {
+						sessionStats[model] = &analyze.ModelStat{}
 					}
-					stats[model].Requests++
+					sessionStats[model].Requests++
 				}
 			}
 			return nil
 		}); err != nil {
 			log.Printf("Error processing %s: %v", eventsPath, err)
 			continue
+		}
+		mergeModelStats(stats, sessionStats)
+		if sessionShutdownNanoAiu != nil {
+			addOptionalFloat64(&totalShutdownNanoAiu, *sessionShutdownNanoAiu)
+		}
+	}
+	for _, stat := range stats {
+		if stat.TotalNanoAiu != nil {
+			addOptionalFloat64(&totalModelNanoAiu, *stat.TotalNanoAiu)
 		}
 	}
 
@@ -7291,7 +7507,8 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 	for m := range stats {
 		models = append(models, m)
 	}
-	sortStatsModels(models, stats)
+	useAICreditsUI := uiVersion == uiVersionNew
+	sortStatsModels(models, stats, useAICreditsUI)
 
 	for _, model := range models {
 		s := stats[model]
@@ -7333,6 +7550,18 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 			"modelStats":              stats,
 			"isCurrentMonthOnly":      !showAllHistory,
 		}
+		if totalShutdownNanoAiu != nil {
+			payload["totalNanoAiu"] = *totalShutdownNanoAiu
+			payload["totalLocalAiUnits"] = nanoAiuToAIUnits(*totalShutdownNanoAiu)
+		}
+		if totalModelNanoAiu != nil {
+			payload["modelAttributedNanoAiu"] = *totalModelNanoAiu
+			payload["modelAttributedLocalAiUnits"] = nanoAiuToAIUnits(*totalModelNanoAiu)
+		}
+		if totalShutdownNanoAiu != nil || totalModelNanoAiu != nil {
+			payload["localAiUnitDefinition"] = "1 Local AI Unit = 1,000,000,000 experimental SDK nano-AI units; it is not a GitHub billing AI Credit."
+			payload["nanoAiuAggregation"] = "latest selected session.shutdown snapshot per session"
+		}
 		if showAPICosts {
 			apiPricingAssumption := "Estimates use built-in public API prices keyed by model ID."
 			if hasActiveAPIPricingOverrides {
@@ -7364,11 +7593,24 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 		return
 	}
 
-	title := "Total Premium Requests (Current Month UTC): %s\n\n"
-	if showAllHistory {
-		title = "Total Premium Requests (All Local History): %s\n\n"
+	if useAICreditsUI {
+		title := "Model-attributed Local AI Units (Sessions Closed in Current Month UTC): %s\n"
+		if showAllHistory {
+			title = "Model-attributed Local AI Units (All Local History): %s\n"
+		}
+		fmt.Printf(title, formatOptionalAIUnits(totalModelNanoAiu))
+		if totalShutdownNanoAiu != nil {
+			fmt.Printf("Top-level Local AI Units from closed sessions: %s\n", formatOptionalAIUnits(totalShutdownNanoAiu))
+		}
+		fmt.Println("Local AI Units are normalized experimental SDK nano-AIU metrics, not GitHub billing AI Credits. Use `copilot-show usage` for directly billed personal-account usage.")
+		fmt.Println()
+	} else {
+		title := "Total Premium Requests (Current Month UTC): %s\n\n"
+		if showAllHistory {
+			title = "Total Premium Requests (All Local History): %s\n\n"
+		}
+		fmt.Printf(title, render.FormatFloatCompact(totalPremiumRequests))
 	}
-	fmt.Printf(title, render.FormatFloatCompact(totalPremiumRequests))
 
 	if len(stats) == 0 {
 		fmt.Println("No detailed model statistics found for the selected period.")
@@ -7377,12 +7619,17 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 
 	totalCostUSD := float64(totalPremiumRequests) * 0.04
 
-	header := []string{"Model", "Req.", "PR"}
+	header := []string{"Model", "Local AI Units", "Requests"}
 	rightAlignedCols := []int{1, 2}
-	if showAPICosts && uiVersion == uiVersionNew {
-		header = append(header, "Token Kind", "Tokens", "USD/Mtok", "Subtotal", "PR Cost", "API Cost")
-		rightAlignedCols = append(rightAlignedCols, 4, 5, 6, 7, 8)
+	if useAICreditsUI && showAPICosts {
+		header = append(header, "Token Kind", "Tokens", "USD/Mtok", "Subtotal", "API Cost")
+		rightAlignedCols = append(rightAlignedCols, 4, 5, 6, 7)
+	} else if useAICreditsUI {
+		header = append(header, "Input Tokens", "Output Tokens")
+		rightAlignedCols = append(rightAlignedCols, 3, 4)
 	} else {
+		header = []string{"Model", "Req.", "PR"}
+		rightAlignedCols = []int{1, 2}
 		header = append(header, "Input Tokens")
 		rightAlignedCols = append(rightAlignedCols, 3)
 		if showAPICosts && hasCacheReadTokens {
@@ -7408,10 +7655,11 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 		if s.Cost == 0 {
 			overageEst = "-"
 		}
-		row := []string{
-			m,
-			strconv.FormatInt(s.Requests, 10),
-			render.FormatFloatCompact(s.Cost),
+		var row []string
+		if useAICreditsUI {
+			row = []string{m, formatOptionalAIUnits(s.TotalNanoAiu), strconv.FormatInt(s.Requests, 10)}
+		} else {
+			row = []string{m, strconv.FormatInt(s.Requests, 10), render.FormatFloatCompact(s.Cost)}
 		}
 		if showAPICosts {
 			apiCost := "-"
@@ -7421,14 +7669,13 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 					apiCost = ">= " + apiCost
 				}
 			}
-			if uiVersion == uiVersionNew {
+			if useAICreditsUI {
 				row = append(
 					row,
 					formatStatsAPICostKinds(s),
 					formatStatsAPICostTokenValues(s),
 					formatStatsAPICostRates(s),
 					formatStatsAPICostSubtotals(s),
-					overageEst,
 					apiCost,
 				)
 			} else {
@@ -7442,16 +7689,20 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 				row = append(row, formatStatTokenCount(s.Output), overageEst)
 				row = append(row, apiCost)
 			}
+		} else if useAICreditsUI {
+			row = append(row, formatStatTokenCount(s.Input), formatStatTokenCount(s.Output))
 		} else {
 			row = append(row, formatStatTokenCount(s.Input), formatStatTokenCount(s.Output), overageEst)
 		}
 		table.Append(row)
 	}
 	table.Render()
-	if !showAllHistory {
-		fmt.Printf("\nEstimated Total Overage Cost (if quota is exhausted): %s USD\n", render.FormatUSD(totalCostUSD))
-	} else {
-		fmt.Printf("\nEstimated Total Overage Cost (across all history): %s USD\n", render.FormatUSD(totalCostUSD))
+	if !useAICreditsUI {
+		if !showAllHistory {
+			fmt.Printf("\nEstimated Total Overage Cost (if quota is exhausted): %s USD\n", render.FormatUSD(totalCostUSD))
+		} else {
+			fmt.Printf("\nEstimated Total Overage Cost (across all history): %s USD\n", render.FormatUSD(totalCostUSD))
+		}
 	}
 	if showAPICosts {
 		label := "Estimated Total API Cost (priced closed segments): %s USD\n"
@@ -7461,9 +7712,21 @@ func showStats(format string, showAllHistory bool, showAPICosts bool, apiPricing
 		fmt.Printf(label, render.FormatUSD(totalEstimatedAPICostUSD))
 	}
 	fmt.Println("Notes:")
-	fmt.Println("- Overage cost uses $0.04 USD per premium request.")
-	fmt.Println("- `PR` means premium requests and can be fractional because session shutdown metrics preserve billed request weights.")
-	fmt.Println("- `PR Cost` is the hypothetical $0.04-per-PR overage charge; if your usage stays within the premium requests included in your plan, the actual overage billed can still be $0.")
+	if useAICreditsUI {
+		fmt.Println("- Model-attributed Local AI Units normalize the latest session-wide `session.shutdown.data.modelMetrics.*.totalNanoAiu` snapshot for each session; `-` means the selected closed sessions did not record that field.")
+		if !showAllHistory {
+			fmt.Println("- The current-month filter uses shutdown time; a session-wide snapshot can include activity from before that month.")
+		}
+		if totalShutdownNanoAiu != nil && totalModelNanoAiu != nil && math.Abs(*totalShutdownNanoAiu-*totalModelNanoAiu) > 0.5 {
+			fmt.Printf("- The top-level shutdown total is %s Local AI Units; it differs from the displayed model-attributed sum by %s units and remains available in YAML.\n", formatOptionalAIUnits(totalShutdownNanoAiu), render.FormatFloatCompact(nanoAiuToAIUnits(math.Abs(*totalShutdownNanoAiu-*totalModelNanoAiu))))
+		}
+		fmt.Println("- The GitHub user billing endpoint covers only usage billed directly to the personal account; organization- or enterprise-managed Copilot usage is excluded.")
+		fmt.Println("- `Requests` counts local model activity and is not a billed-usage total; active-session fallback rows do not invent Local AI Units.")
+	} else {
+		fmt.Println("- Overage cost uses $0.04 USD per premium request.")
+		fmt.Println("- `PR` means premium requests and can be fractional because session shutdown metrics preserve billed request weights.")
+		fmt.Println("- `PR Cost` is the hypothetical $0.04-per-PR overage charge; if your usage stays within the premium requests included in your plan, the actual overage billed can still be $0.")
+	}
 	if showAPICosts {
 		if !hasActiveAPIPricingOverrides {
 			fmt.Println("- API cost uses the built-in public token-price catalog derived from provider references.")

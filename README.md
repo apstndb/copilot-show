@@ -1,11 +1,11 @@
 # copilot-show
 
-`copilot-show` is a command-line tool to inspect various information from the GitHub Copilot CLI, such as quotas, models, and tools.
+`copilot-show` is a command-line tool to inspect GitHub Copilot information such as AI Credits usage, SDK quota signals, models, and tools.
 It is built on top of [github.com/github/copilot-sdk/go](https://github.com/github/copilot-sdk).
 
 ## Documentation
 
-- `docs/research/README.md`: curated research notes on premium-request billing, session event-model caveats, and API pricing overrides.
+- `docs/research/README.md`: curated research notes on experimental local AI-unit metrics, historical premium-request billing, session event-model caveats, and API pricing overrides.
 
 ## Installation
 
@@ -26,11 +26,11 @@ mise use -g go:github.com/apstndb/copilot-show@latest
 Run the tool with a subcommand to inspect specific resources.
 
 Available subcommands:
-- `quota`: Show Copilot Premium Interactions usage with readable metric names and included limits.
+- `quota`: Show the AI Credits allowance and other quota signals reported by the Copilot SDK. Use `usage` for detailed fractional consumption.
 - `models`: Show models returned by the live Copilot SDK `ListModels` call, with runtime limits, reasoning support, policy state, and `$ I/O` token pricing.
 - `model-docs`: Show docs-backed model metadata from `github/docs`, joined with the live CLI model list. Use `--all` for broader docs-backed fields, or `--visible-only` to hide docs rows your account cannot select right now.
 - `tools`: Show available tools.
-- `usage`: Show billing usage report from GitHub API (`--billing premium-request|ai-credits|auto`), with included limits from quota snapshots. Default table shows Used credits or requests; use `--with-pricing` to join SDK model token pricing, or `-f yaml` for billed amounts.
+- `usage`: Show AI Credits billing usage from the GitHub API. Use `--with-pricing` to join SDK model token pricing, or `-f yaml` for billed amounts.
 - `stats`: Show local usage statistics aggregated from session history, with optional API-equivalent cost estimates from token usage.
 - `turns`: Show turn-by-turn usage statistics for a session.
 
@@ -46,7 +46,9 @@ Use `--show-hidden --help` to include hidden diagnostics commands and hidden fla
 
 ### Quota Information
 
-Shows the current usage and included limits for Copilot quota metrics (for example Premium Interactions or AI Credits when present).
+Shows the current AI Credits allowance and other quota signals reported by the Copilot SDK.
+When the auth snapshot reports `token_based_billing: true`, or does not report the billing mode, the SDK still uses the raw key `premium_interactions`; `copilot-show` presents that value as AI Credits. An explicit request-based value keeps the Premium Interactions label.
+Use `copilot-show usage` for detailed fractional consumption. Raw SDK field names remain available with `-f yaml`.
 
 ```bash
 copilot-show quota
@@ -55,24 +57,19 @@ copilot-show quota
 Example Output:
 ```text
 --- Quota Information ---
-┌──────────────────────┬──────────┬──────┬────────────┬─────────┐
-│ METRIC               │ INCLUDED │ USED │ OVERAGE    │ USAGE % │
-├──────────────────────┼──────────┼──────┼────────────┼─────────┤
-│ Chat                 │        0 │    0 │ Disallowed │ -       │
-│ Completions          │        0 │    0 │ Disallowed │ -       │
-│ Premium Interactions │      300 │   65 │ Disallowed │ 21.7%   │
-└──────────────────────┴──────────┴──────┴────────────┴─────────┘
+┌─────────────┬──────────┬──────┬────────────┬─────────┐
+│ Metric      │ Included │ Used │ Overage    │ Usage % │
+├─────────────┼──────────┼──────┼────────────┼─────────┤
+│ Chat        │        0 │    0 │ Disallowed │       - │
+│ Completions │        0 │    0 │ Disallowed │       - │
+│ AI Credits  │     1500 │    1 │ Disallowed │    0.1% │
+└─────────────┴──────────┴──────┴────────────┴─────────┘
 Last Updated: 2026-03-12T20:41:07+09:00
 
-Plan Reference (legacy premium requests, github/docs):
-- Copilot Pro: 300
-- Copilot Pro+: 1,500
-- Copilot Business: 300
-- Copilot Enterprise: 1,000
-- Copilot Max: see github/docs AI credits tables (20,000 total AI credits/month)
-
-Month Progress (UTC): 38.8%
-...
+Notes:
+- 'AI Credits' is sourced from the Copilot SDK's legacy-named `premium_interactions` snapshot.
+- 'Used' is the SDK's whole-credit value; `copilot-show usage` shows detailed fractional consumption.
+- Raw SDK field names remain available with `--format yaml`.
 ```
 
 ### List Models
@@ -145,9 +142,8 @@ copilot-show skills --wrap-long-text
 
 ### Usage Report
 
-Shows detailed billing usage from the GitHub API (requires `gh` CLI).
-By default it auto-detects billing mode (premium-request vs ai-credits) from quota snapshots and API data; use `--billing premium-request` or `--billing ai-credits` to force a mode.
-The default table focuses on **Used** credits or premium requests grouped by Period and SKU with subtotals and included limits from quota snapshots when available.
+Shows detailed AI Credits billing usage from the GitHub user API (requires `gh` CLI). This endpoint covers usage billed directly to the personal account; it excludes Copilot usage managed and billed through an organization or enterprise.
+The default table focuses on **Used** credits grouped by Period and SKU with subtotals and included limits from quota snapshots when available.
 Billed quantities and USD amounts remain available in YAML output (`-f yaml`).
 Use `--with-pricing` to append a second table that joins each usage row with live Copilot SDK model token pricing (`$ I/O` per M tokens). Unmatched models show `-` in the pricing column.
 With `--with-pricing -f yaml`, reports also include `withPricing`, `ioSummary`, and `tokenPricing` fields when a model match is found.
@@ -156,7 +152,7 @@ Multiple periods can be shown with the `--last` flag.
 The `Period` column can be sorted in ascending or descending order with the `--sort-order` flag (default is `desc`).
 
 ```bash
-# Current month (auto-detects billing mode)
+# Current month
 copilot-show usage
 
 # Join usage with live SDK model token pricing
@@ -167,12 +163,6 @@ copilot-show usage -f yaml
 
 # Usage plus joined pricing in YAML
 copilot-show usage --with-pricing -f yaml
-
-# Force premium-request billing
-copilot-show usage --billing premium-request
-
-# Force AI credits billing (June 2026+ individual plans)
-copilot-show usage --billing ai-credits
 
 # Yesterday's report
 copilot-show usage -d -1
@@ -187,8 +177,11 @@ copilot-show usage -m 0 --last 3
 ### Stats
 
 Aggregates usage statistics from local session history (`~/.copilot/session-state/*/events.jsonl`).
-Useful for understanding which models are consuming your quota.
-The `PR` column means premium requests and preserves fractional multipliers such as `0.33`. `PR Cost` is the hypothetical $0.04-per-PR overage charge; if your usage stays within the premium requests included in your plan, the actual overage billed can still be $0.
+Useful for understanding which models appear in local session events.
+The default table reports model-attributed **Local AI Units** by normalizing the SDK's experimental `session.shutdown.data.modelMetrics.*.totalNanoAiu` values (`10^9` nano-AIU = one displayed local unit). The SDK describes these values as session-wide accumulated metering, so `stats` uses the latest shutdown snapshot in each selected session instead of summing successive resume/shutdown snapshots. The current-month filter selects sessions by shutdown time, so a session-wide value can include activity from before that month. A `-` means that the selected closed sessions predate or omit this field; an explicit zero remains `0`. The top-level `totalNanoAiu` total and model-attributed aggregate are both available in YAML, and the table warns if they differ.
+
+Local AI Units are not GitHub billing AI Credits and are not billing authority. Use `copilot-show usage` for AI Credits billed directly to the personal account; organization- or enterprise-managed Copilot usage is outside that user endpoint.
+The hidden `--ui-version old` compatibility view retains the historical premium-request columns for older logs and research.
 Use `--api-costs` to estimate equivalent API cost from shutdown token usage. When shutdown metrics contain `cacheReadTokens`, the estimate treats them as a subset of `inputTokens`, prices only the uncached remainder at the full input-token rate, and prices cached reads separately when the selected model has a verified cached-input price. The default table lays out token kinds, token counts, `USD/Mtok` rates, and cost subtotals as aligned multiline cells within each model row, and its `Input Tokens` row shows the billed uncached remainder rather than the raw total input. If future shutdown logs add extra token-usage keys such as `cacheOutputTokens`, the new table will add an extra row for that model automatically; those rows remain unpriced until explicit API-pricing support is added.
 Models without matching API pricing still remain in the output; their API-cost cells stay empty and the printed total becomes a lower bound.
 Model availability is still plan-dependent, so local shutdown metrics can contain model IDs that are not currently visible in `copilot-show models`.
@@ -199,7 +192,7 @@ Use `--api-pricing-template` to dump a commented starter file with every built-i
 ```bash
 copilot-show stats [-a]
 
-# Compare premium-request overage vs. API-equivalent token cost
+# Compare local AI Units with API-equivalent token cost
 copilot-show stats --api-costs
 
 # Write a commented starter file you can edit locally
@@ -255,7 +248,7 @@ The following commands are hidden by default but can be executed by specifying t
 - `discover`: Unified discovery snapshot from server-scoped SDK APIs (MCP, skills, agents, instructions, and canonical discovery paths)
 - `account`: Show account authentication and registered users
 - `session-metadata [sessionID]`: Show session metadata snapshot (model, mode, workspace)
-- `session-usage [sessionID]`: Show live per-session usage metrics, including AI credits converted from NanoAiu (`TotalNanoAiu` / 10⁹)
+- `session-usage [sessionID]`: Show live per-session usage metrics, including experimental Local AI Units normalized from `TotalNanoAiu` (`TotalNanoAiu` / 10⁹)
 - `session-auth [sessionID]`: Show per-session authentication status
 - `current-model`: Show the currently selected model ID
 - `current-agent`: Show the currently selected agent
@@ -299,7 +292,7 @@ The following event types currently have explicit formatting:
 | `tool.execution_start` | `Tool Start` | Folded into synthetic `Tool` span | Folded into synthetic `Tool` span | Raw mode shows `toolName` or `<unknown>`. In spans modes it is paired by `toolCallId`. |
 | `tool.execution_complete` | `Tool End` | Folded into synthetic `Tool` span | Folded into synthetic `Tool` span | Raw mode shows tool name, optional model, and `Success: ...`. In spans modes it completes the paired tool row. |
 | `assistant.turn_end` | `Assistant Turn End` | `Assistant Turn End` | Suppressed; duration moves to synthetic `Turn` row | Raw/spans show reconstructed turn number and duration. |
-| `session.shutdown` | `Session Shutdown` | `Session Shutdown` | `Session Shutdown` | Shows total premium requests, plus per-model request/cost/token lines when `modelMetrics` exists. |
+| `session.shutdown` | `Session Shutdown` | `Session Shutdown` | `Session Shutdown` | Shows historical premium-request and per-model request/cost/token details. Use `stats` for experimental Local AI Units derived from `totalNanoAiu`. |
 | `skill.invoked` | `Skill Invoked` | `Skill Invoked` | `Skill Invoked` | Uses `data.name`, falling back to `data.skillName`. |
 | `subagent.started` | `Subagent Started` | `Subagent Started` | `Subagent Started` | Uses `agentDisplayName`, falling back to `agentName`. |
 | `subagent.completed` | `Subagent Completed` | `Subagent Completed` | `Subagent Completed` | Uses `agentDisplayName`, falling back to `agentName`. |

@@ -8,7 +8,7 @@ They keep the conclusions, caveats, and reusable query patterns that matter for 
 
 | Repo doc | Purpose |
 | --- | --- |
-| `docs/research/billing-model.md` | Explain how premium requests reconcile against session shutdown metrics and weighted user-message windows. |
+| `docs/research/billing-model.md` | Separate experimental local nano-AIU shutdown metrics from GitHub Billing API totals, and explain how historical premium requests reconcile against weighted user-message windows. |
 | `docs/research/event-types-reference.md` | Catalog the local `events.jsonl` event types that `copilot-show` currently recognizes and the fields that matter for billing, turn windows, and nested tool lineage. |
 | `docs/research/session-event-model.md` | Capture event-model caveats for resume boundaries, turn IDs, interaction IDs, parent links, and nested subagent spans. |
 | `docs/research/api-pricing-overrides.md` | Explain why `copilot-show` keeps public list prices in-repo and uses local YAML overrides for account-specific effective prices. |

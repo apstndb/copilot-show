@@ -10,6 +10,7 @@ const PricingCatalogVersion = "public-token-pricing-2026-06-10-github-docs-e6356
 type ModelStat struct {
 	Requests                int64            `json:"requests" yaml:"requests"`
 	Cost                    float64          `json:"cost" yaml:"cost"`
+	TotalNanoAiu            *float64         `json:"totalNanoAiu,omitempty" yaml:"totalNanoAiu,omitempty"`
 	Input                   int64            `json:"inputTokens" yaml:"inputTokens"`
 	CacheRead               int64            `json:"cacheReadTokens,omitempty" yaml:"cacheReadTokens,omitempty"`
 	CacheWrite              int64            `json:"cacheWriteTokens,omitempty" yaml:"cacheWriteTokens,omitempty"`

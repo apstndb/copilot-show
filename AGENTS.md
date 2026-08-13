@@ -4,7 +4,7 @@ This project, `copilot-show`, is a CLI tool designed to explore and expose inter
 
 ## Project Goal
 Provide a transparent view into Copilot's runtime state, including:
-- Quota usage (Premium Interactions).
+- AI Credits billing usage, allowances, and other quota signals reported by the Copilot SDK.
 - Available AI models and their specific capabilities (context window, SDK `$ I/O` token pricing; `billingMultiplier` remains YAML-only when present).
 - Built-in tools and their configurations.
 - Session-specific data like current agents, modes, and workspace files.
@@ -19,6 +19,7 @@ Provide a transparent view into Copilot's runtime state, including:
 ## Implementation Details
 - The tool interacts with the local Copilot CLI server (started/managed by the SDK) for online commands; session-log commands (`stats`, `turns`, `history`, `graph`, `validate-events`, `resume-branches`) read `~/.copilot/session-state` offline.
 - `usage` shells out to `gh api` and requires GitHub CLI authentication; most other subcommands use the user's existing Copilot login session.
+- Target current AI Credits billing. When `CopilotUser.TokenBasedBilling` is true, present the SDK's legacy-named `premium_interactions` quota snapshot as AI Credits; preserve raw field names in YAML. Keep true premium-request handling only as hidden compatibility for historical API and SDK data.
 - Most online subcommands utilize a temporary session created via `client.CreateSession`.
 - Session event semantics, billing caveats, and research notes live in [docs/research/](docs/research/README.md) — read before changing `history`, `turns`, `stats`, or graph logic.
 - DuckDB SQL workflows for inspecting local session JSONL live in [.github/skills/duckdb-jsonl-inspection/](.github/skills/duckdb-jsonl-inspection/SKILL.md).
@@ -39,10 +40,10 @@ Provide a transparent view into Copilot's runtime state, including:
 - Keep "useful but cluttered" or internal-only information under `Hidden: true` subcommands.
 - Follow Go best practices and ensure `go mod tidy` is run after adding dependencies.
 - Never introduce new abbreviations in the code or UI without explicit user permission. (Exception: 'requests' may be abbreviated as 'req.' in table headers).
-- Use user-facing terminology in table headers (e.g., 'Used', 'Billed' instead of 'Gross', 'Net' in usage reports). Use 'Included' instead of 'Entitlement' for premium request limits.
+- Use user-facing terminology in table headers (e.g., 'Used', 'Billed' instead of 'Gross', 'Net' in usage reports). Use 'Included' instead of 'Entitlement' for AI Credits limits.
 - All significant UI modifications (changes to table layouts, sorting, or new display formats) should support temporary A/B testing while they are being validated.
 - Use a reversible mechanism during that validation period so the old and new implementations can be compared side by side.
 - Once the new implementation is verified, keep a single default user-facing path.
 - If the A/B mechanism will be reused, keep the toggle hidden rather than removing and re-adding it.
 - Document the changes and the verification results when retiring or hiding the temporary A/B implementation.
-- `--ui-version` (hidden) still toggles stats table layout and table fold behavior; history A/B was retired 2026-07-05 (new layout only).
+- `--ui-version` (hidden) still toggles quota and stats table layouts and table fold behavior; history A/B was retired 2026-07-05 (new layout only).

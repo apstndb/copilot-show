@@ -1435,6 +1435,61 @@ func TestFormatStatsAPICostDetails(t *testing.T) {
 	}
 }
 
+func TestShutdownModelMetricsPreserveOptionalNanoAiu(t *testing.T) {
+	t.Parallel()
+
+	stats := make(map[string]*analyze.ModelStat)
+	metrics := map[string]any{
+		"gpt-5.4": map[string]any{
+			"requests":     map[string]any{"count": float64(3), "cost": 1.0},
+			"totalNanoAiu": 1_250_000_000.0,
+			"usage":        map[string]any{"inputTokens": float64(100), "outputTokens": float64(20)},
+		},
+		"legacy": map[string]any{
+			"requests": map[string]any{"count": float64(2), "cost": 0.0},
+		},
+	}
+	addShutdownModelMetrics(stats, metrics)
+	total, hasTotal := replaceShutdownModelNanoAiu(stats, metrics)
+
+	if !hasTotal || total != 1_250_000_000.0 {
+		t.Fatalf("addShutdownModelMetrics() total = %v, %v", total, hasTotal)
+	}
+	if got := stats["gpt-5.4"]; got.TotalNanoAiu == nil || *got.TotalNanoAiu != total || got.Requests != 3 || got.Input != 100 || got.Output != 20 {
+		t.Fatalf("gpt-5.4 stat = %#v", got)
+	}
+	if stats["legacy"].TotalNanoAiu != nil {
+		t.Fatalf("legacy TotalNanoAiu = %v, want nil", *stats["legacy"].TotalNanoAiu)
+	}
+}
+
+func TestReplaceShutdownModelNanoAiuUsesLatestSessionSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stats := make(map[string]*analyze.ModelStat)
+	first := map[string]any{
+		"gpt-5.4": map[string]any{"totalNanoAiu": 1_000_000_000.0},
+		"legacy":  map[string]any{"totalNanoAiu": 500_000_000.0},
+	}
+	second := map[string]any{
+		"gpt-5.4": map[string]any{"totalNanoAiu": 2_000_000_000.0},
+	}
+	addShutdownModelMetrics(stats, first)
+	replaceShutdownModelNanoAiu(stats, first)
+	addShutdownModelMetrics(stats, second)
+	total, ok := replaceShutdownModelNanoAiu(stats, second)
+
+	if !ok || total != 2_000_000_000.0 {
+		t.Fatalf("latest total = %v, %v", total, ok)
+	}
+	if got := stats["gpt-5.4"].TotalNanoAiu; got == nil || *got != 2_000_000_000.0 {
+		t.Fatalf("gpt-5.4 TotalNanoAiu = %v", got)
+	}
+	if got := stats["legacy"].TotalNanoAiu; got != nil {
+		t.Fatalf("legacy TotalNanoAiu = %v, want nil after replacement", *got)
+	}
+}
+
 func TestConfigureShowHiddenHelp(t *testing.T) {
 	t.Parallel()
 
@@ -1558,7 +1613,7 @@ func TestParseUsageBillingMode(t *testing.T) {
 		want  string
 		isErr bool
 	}{
-		{raw: "", want: usageBillingPremiumRequest},
+		{raw: "", want: usageBillingAICredits},
 		{raw: "premium-request", want: usageBillingPremiumRequest},
 		{raw: "ai-credits", want: usageBillingAICredits},
 		{raw: "auto", want: usageBillingAuto},
@@ -1583,6 +1638,22 @@ func TestParseUsageBillingMode(t *testing.T) {
 				t.Fatalf("parseUsageBillingMode(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestUsageCommandDefaultsToAICredits(t *testing.T) {
+	t.Parallel()
+
+	cmd := newUsageCmd(nil)
+	billingFlag := cmd.Flags().Lookup("billing")
+	if billingFlag == nil {
+		t.Fatal("newUsageCmd() missing --billing flag")
+	}
+	if billingFlag.DefValue != usageBillingAICredits {
+		t.Fatalf("--billing default = %q, want %q", billingFlag.DefValue, usageBillingAICredits)
+	}
+	if !billingFlag.Hidden {
+		t.Fatal("--billing should remain hidden as a legacy compatibility control")
 	}
 }
 
@@ -1641,18 +1712,22 @@ func TestResolveUsageBillingMode(t *testing.T) {
 	}
 }
 
-func TestNanoAiuToCredits(t *testing.T) {
+func TestNanoAiuToAIUnits(t *testing.T) {
 	t.Parallel()
 
-	if got := nanoAiuToCredits(1_500_000_000); got != 1.5 {
-		t.Fatalf("nanoAiuToCredits() = %v, want 1.5", got)
+	if got := nanoAiuToAIUnits(1_500_000_000); got != 1.5 {
+		t.Fatalf("nanoAiuToAIUnits() = %v, want 1.5", got)
 	}
-	if got := formatOptionalCredits(nil); got != "-" {
-		t.Fatalf("formatOptionalCredits(nil) = %q", got)
+	if got := formatOptionalAIUnits(nil); got != "-" {
+		t.Fatalf("formatOptionalAIUnits(nil) = %q", got)
 	}
-	value := 754.52 * nanoAiuPerCredit
-	if got := formatOptionalCredits(&value); got != "754.52" {
-		t.Fatalf("formatOptionalCredits(754.52 credits) = %q", got)
+	value := 754.52 * nanoAiuPerAIUnit
+	if got := formatOptionalAIUnits(&value); got != "754.52" {
+		t.Fatalf("formatOptionalAIUnits(754.52 units) = %q", got)
+	}
+	zero := 0.0
+	if got := formatOptionalAIUnits(&zero); got != "0" {
+		t.Fatalf("formatOptionalAIUnits(explicit zero) = %q", got)
 	}
 }
 
@@ -1666,11 +1741,128 @@ func TestQuotaIncludedLimit(t *testing.T) {
 		},
 	}
 
-	if got := quotaIncludedLimit(quota, usageBillingPremiumRequest); got != 300 {
+	tokenBased := true
+	requestBased := false
+	if got := quotaIncludedLimit(quota, usageBillingPremiumRequest, &requestBased); got != 300 {
 		t.Fatalf("premium included = %v", got)
 	}
-	if got := quotaIncludedLimit(quota, usageBillingAICredits); got != 20000 {
+	if got := quotaIncludedLimit(quota, usageBillingAICredits, &tokenBased); got != 20000 {
 		t.Fatalf("ai credits included = %v", got)
+	}
+	legacyKeyOnly := &rpc.AccountGetQuotaResult{QuotaSnapshots: map[string]rpc.AccountQuotaSnapshot{
+		"premium_interactions": {EntitlementRequests: 1500},
+	}}
+	if got := quotaIncludedLimit(legacyKeyOnly, usageBillingAICredits, &tokenBased); got != 1500 {
+		t.Fatalf("token-based legacy-key included = %v", got)
+	}
+	if got := quotaIncludedLimit(legacyKeyOnly, usageBillingAICredits, &requestBased); got != 0 {
+		t.Fatalf("request-based legacy-key AI credits included = %v, want 0", got)
+	}
+}
+
+func TestQuotaSnapshotKeys(t *testing.T) {
+	t.Parallel()
+
+	quota := &rpc.AccountGetQuotaResult{
+		QuotaSnapshots: map[string]rpc.AccountQuotaSnapshot{
+			"premium_interactions": {},
+			"completions":          {},
+			"chat":                 {},
+		},
+	}
+
+	if got := strings.Join(quotaSnapshotKeys(quota), ","); got != "chat,completions,premium_interactions" {
+		t.Fatalf("quotaSnapshotKeys() = %q, want all metrics", got)
+	}
+}
+
+func TestTokenBasedBillingFromUser(t *testing.T) {
+	t.Parallel()
+
+	tokenBased := true
+	requestBased := false
+	tests := []struct {
+		name string
+		user *rpc.CopilotUserResponse
+		want *bool
+	}{
+		{name: "missing user"},
+		{
+			name: "top-level token billing",
+			user: &rpc.CopilotUserResponse{TokenBasedBilling: &tokenBased},
+			want: &tokenBased,
+		},
+		{
+			name: "top-level request billing wins",
+			user: &rpc.CopilotUserResponse{
+				TokenBasedBilling: &requestBased,
+				QuotaSnapshots: &rpc.CopilotUserResponseQuotaSnapshots{
+					PremiumInteractions: &rpc.CopilotUserResponseQuotaSnapshotsPremiumInteractions{
+						TokenBasedBilling: &tokenBased,
+					},
+				},
+			},
+			want: &requestBased,
+		},
+		{
+			name: "snapshot fallback",
+			user: &rpc.CopilotUserResponse{
+				QuotaSnapshots: &rpc.CopilotUserResponseQuotaSnapshots{
+					PremiumInteractions: &rpc.CopilotUserResponseQuotaSnapshotsPremiumInteractions{
+						TokenBasedBilling: &tokenBased,
+					},
+				},
+			},
+			want: &tokenBased,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := tokenBasedBillingFromUser(test.user)
+			if test.want == nil {
+				if got != nil {
+					t.Fatalf("tokenBasedBillingFromUser() = %v, want nil", *got)
+				}
+				return
+			}
+			if got == nil || *got != *test.want {
+				t.Fatalf("tokenBasedBillingFromUser() = %v, want %v", got, *test.want)
+			}
+		})
+	}
+}
+
+func TestCopilotUserFromAuth(t *testing.T) {
+	t.Parallel()
+
+	user := &rpc.CopilotUserResponse{}
+	tests := []struct {
+		name string
+		auth rpc.AuthInfo
+		want *rpc.CopilotUserResponse
+	}{
+		{name: "missing auth"},
+		{name: "typed nil auth", auth: (*rpc.GhCLIAuthInfo)(nil)},
+		{name: "GitHub CLI", auth: &rpc.GhCLIAuthInfo{CopilotUser: user}, want: user},
+		{name: "Copilot API token", auth: &rpc.CopilotAPITokenAuthInfo{CopilotUser: user}, want: user},
+		{name: "environment", auth: &rpc.EnvAuthInfo{CopilotUser: user}, want: user},
+		{name: "API key", auth: &rpc.APIKeyAuthInfo{CopilotUser: user}, want: user},
+		{name: "HMAC", auth: &rpc.HMACAuthInfo{CopilotUser: user}, want: user},
+		{name: "token", auth: &rpc.TokenAuthInfo{CopilotUser: user}, want: user},
+		{name: "user", auth: &rpc.UserAuthInfo{CopilotUser: user}, want: user},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := copilotUserFromAuth(test.auth); got != test.want {
+				t.Fatalf("copilotUserFromAuth() = %p, want %p", got, test.want)
+			}
+		})
 	}
 }
 
